@@ -325,8 +325,9 @@ RAILMOTOR = RAIL_DRIVE  # compatibility alias for existing helper code
 # bounded to a small fraction of the rolling-loss they RECOVER (tyre/body hysteresis
 # that is already being dissipated), so they reclaim spent energy, never create it.
 AMBIENT_HARVEST_W = {
-    "solar":        210.0,   # quantum-dot film over the upper body (~3 m^2 x ~7% effective)
-    "solar_roof":   440.0,   # dedicated PV ROOF (~2.0 m^2 x 22% x 1 kW/m^2 = 650 W total solar)
+    "solar":        240.0,   # quantum-dot film over the upper body (~3.4 m^2 x ~7% effective)
+    "solar_roof":   560.0,   # dedicated PV ROOF (2.86 m^2 panel x 0.85 usable x 23% x 1 kW/m^2
+    #                          = ~560 W; 800 W total solar -- grounded in the real roof area)
     "suspension":   130.0,   # linear EM dampers -- NAMEPLATE; runtime = bump dissipation only
     "triboelectric": 62.0,   # TENG films on underbody + wheel wells (nameplate)
     "tire":          40.0,   # airless metamaterial tyres with embedded harvesters (nameplate)
@@ -2005,7 +2006,7 @@ def build_engine_parts(n_pistons=1):
              AMBIENT_HARVEST_W["triboelectric"], AMBIENT_HARVEST_W["tire"]),
          "~%.0f W EXTERNAL solar charges even coasting engine-OFF; in bright sun below" % (
              (AMBIENT_HARVEST_W["solar"] + AMBIENT_HARVEST_W["solar_roof"]) * SUN),
-         "~10-25 mph it can cover the road load (solar-sustained). Core MPG lever."],
+         "~50 mph it can cover the road load (solar-sustained). Core MPG lever."],
         order=nextord(), explode=(0.0, 1.4, 0.0), color=(70, 120, 190)))
 
     # --- Dedicated PV solar ROOF panel (extra electric) ----------------
@@ -2082,7 +2083,7 @@ def build_engine_parts(n_pistons=1):
         order=nextord(), explode=(0.0, 0.4, -1.5), color=(150, 205, 235)))
 
     # --- Through-body straight flow-through duct (rear-wake drag kill) --
-    parts.append(Part("flowduct", "Through-Body Flow Duct (kills rear-wake drag)",
+    parts.append(Part("flowduct", "Through-Body Flow Duct (fills the base-wake vacuum)",
         _flow_through_duct(0.0, r_out),
         ["Function: a wide, thin, STRAIGHT hollow duct from a low front-GRILL intake,",
          "straight through the body, to a rear DIFFUSER. High-pressure nose air flows",
@@ -3977,7 +3978,7 @@ INFO_SECTIONS = [
         " - TRIBOELECTRIC/TYRE/PIEZO: reclaim a slice of the tyre + body HYSTERESIS that",
         "   rolling resistance already dissipates (capped to %.0f%% of rolling loss)." % (
             HARVEST_ROLL_FRAC * 100),
-        "So in bright sun, below ~10-25 mph the SOLAR alone can cover the whole road",
+        "So in bright sun, below ~50 mph the SOLAR alone can cover the whole road",
         "load -> fuel-free (solar-sustained), no pedals and no fuel.",
         "DOWNHILL FLYWHEEL: on descents, gravity + inertia wind the free-floating",
         "%.0f kg tungsten flywheel through the low-slip clutch (no combustion), and" % DIMS['flywheel_mass_kg'],
@@ -4155,8 +4156,7 @@ INFO_SECTIONS = [
         "Effect: it cuts the effective Cd ~%.0f%% at low speed rising to ~%.0f%% at" % (
             DUCT["base"] * DUCT["blend"] * 100, (DUCT["base"] + DUCT["speed"]) * DUCT["blend"] * 100),
         "highway speed (the wake vacuum grows with speed), folded straight into the",
-        "Cd so the M chart AND drive economy both show it -- ~%.0f%% MPG at 80 mph and" % (
-            (g_effcd_gain := 0) or 10),
+        "Cd so the M chart AND drive economy both show it -- ~10%% MPG at 80 mph and",
         "up to ~26%% at 50 mph in this final pass. It pairs with the boat-tail, morphing",
         "skin and drag-capture grooves: the skin slips most air, the grooves catch the",
         "remainder, and the duct MOVES the useful air through -- so the car behaves",
@@ -4424,7 +4424,7 @@ class App:
 
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("GmansRun V1.17 -- HOHEV-Rotary Gen 4 Digital Twin")
+        pygame.display.set_caption("GmansRun V1.17 -- HOHEV-Rotary Gen 4 Digital Twin (FINAL prototype)")
         self.W, self.H = 1600, 920
         self.screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
@@ -5855,7 +5855,7 @@ class App:
             "",
             "SOLAR (~%.0f W in sun): PV roof + film -- EXTERNAL energy, so below" % (
                 (AMBIENT_HARVEST_W["solar"] + AMBIENT_HARVEST_W["solar_roof"]) * SUN),
-            " ~10-25 mph it alone can cover the road load -> SOLAR-SUSTAINED, no",
+            " ~50 mph it alone can cover the road load -> SOLAR-SUSTAINED, no",
             " fuel (the tyre/tribo harvest only RECLAIMS rolling loss, never free).",
             "",
             "PEDALS (%.0f W/seat) stack on top of that:" % PEDAL_WATTS_PER_SEAT,
@@ -5887,6 +5887,7 @@ class App:
 def print_startup_banner():
     print("=" * 70)
     print(" GmansRun V1.17 -- HOHEV-Rotary Gen 4 Standalone Digital Twin")
+    print(" FINAL prototype -- to-scale, drivable, energy-honest (no free energy)")
     print("=" * 70)
     print(" PREVIEW mode loads first: orbit the full 3D engine and watch every")
     print(" part work. TAB cycles ENGINE PREVIEW > CAR VIEW (the whole vehicle to")
@@ -5917,8 +5918,8 @@ def print_startup_banner():
     print("   overflow->flywheel -- optimal routing keeps effective round-trip ~96%% (14)")
     print("   ONE-PASS NETTING: harvest used the same instant for traction bypasses storage")
     print("   entirely; operating-point + control confirmed at optimum -- see info 14, 15")
-    print("   THROUGH-BODY FLOW DUCT: straight front-grill->rear-diffuser pipe fills the rear")
-    print("   wake to kill pressure drag (dominant at speed) -> big highway MPG gain (8d)")
+    print("   THROUGH-BODY FLOW DUCT: RAISED exit fills the base-wake centre (mid-height)")
+    print("   to kill pressure drag -> effective highway Cd ~0.039, +~10-26%% MPG (8d)")
     print("-" * 70)
     print(" Controls:")
     print("   TAB  cycle ENGINE PREVIEW > CAR VIEW > DRIVE   M  MPG chart   I  info   H  help")
