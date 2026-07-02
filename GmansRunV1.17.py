@@ -355,7 +355,8 @@ SUN = 1.0                      # favourable-daylight sun intensity, 0..1 (bright
 # wells, forming a ground-effect tunnel). It retracts under hard accel/brake for
 # stability. Modelled as a speed-dependent multiplier on the effective Cd.
 AERO = {
-    "morph_cd_min_frac": 0.74,   # fully-morphed Cd = 74% of the static Cd (~0.059)
+    "morph_cd_min_frac": 0.72,   # fully-morphed Cd = 72% of static (cleaner boat-tail +
+    #                              diffuser now that the raised flow duct exits into it)
     "morph_onset_mph":   22.0,   # morphing begins to deploy above this
     "morph_full_mph":    58.0,   # fully deployed by highway cruise
 }
@@ -441,16 +442,18 @@ PENDULUM = {
 }
 
 # THROUGH-BODY STRAIGHT FLOW-THROUGH DUCT. A wide, thin, straight hollow duct runs
-# from a low front-grill intake, straight through the body, to a rear diffuser. It
-# lets high-pressure nose air flow 100% straight through the car and exit into the
+# from a front-grill intake, straight through the body, to a rear diffuser. It lets
+# high-pressure nose air flow 100% straight through the car and exit into the
 # low-pressure WAKE, "filling" the rear vacuum pocket -- attacking PRESSURE (form)
-# drag, which dominates above ~50 mph. Modelled as a speed-dependent cut to the
-# effective Cd (stronger at speed, where the wake vacuum is biggest).
+# drag, which dominates above ~50 mph. The exit was RAISED toward the base-wake
+# CENTROID (mid-height), where the vacuum is strongest, so the through-flow fills it
+# more directly than a floor-level exit -- a real, geometry-justified drag cut.
+# Modelled as a speed-dependent cut to the effective Cd (stronger at speed).
 DUCT = {
-    "base":    0.15,   # baseline wake-fill drag reduction (any speed)
-    "speed":   0.10,   # EXTRA reduction that ramps in with speed
+    "base":    0.18,   # baseline wake-fill drag reduction (raised, wake-centred exit)
+    "speed":   0.12,   # EXTRA reduction that ramps in with speed
     "ref_mph": 60.0,   # speed at which the extra reduction saturates
-    "blend":   0.78,   # how much of the modelled wake reduction lands on the Cd
+    "blend":   0.82,   # how much of the modelled wake reduction lands on the Cd
 }
 
 # WHOLE-VEHICLE dimensions, to real-life scale (millimetres). The CAR VIEW builds the
@@ -1299,39 +1302,74 @@ def _second_stage_turbine(zc, r_out):
     return meshes
 
 
+def _wheel_meshes(piv, wr, ww, group="wheel", label_prefix=None):
+    """The ONE detailed, to-scale outer-rotor in-wheel drive, shared by the whole-car
+    wheels AND the engine-preview regen-wheel showcase so they always match. Everything
+    lives INSIDE the tyre radius `wr` (nothing pokes below the road/past the body):
+    tyre, rim rotor shell, bonded magnet band, in-rim disc, 6 spokes, PM bearing hub,
+    and a FIXED EM rail stator with copper windings, the precision air gap and 96-pole
+    markers. `piv`=(x,y,z) hub centre; the wheel spins about local Z brought onto the
+    X (lateral) axis. `label_prefix` (e.g. 'FR') names the callouts, or None for none."""
+    px, py, pz = float(piv[0]), float(piv[1]), float(piv[2])
+    pivn = np.array([px, py, pz])
+    ms = []
+
+    def lname(t):
+        return ("%s %s" % (label_prefix, t)) if label_prefix else ""
+
+    def spin(mesh):
+        return _place_spinner([mesh], pivn, (0.0, math.pi / 2), group)
+
+    def static_ring(v, f, col, name=""):
+        vv = np.asarray(v) @ rot_y(math.pi / 2).T + pivn
+        return Mesh(vv, f, col, name=name, group="static")
+
+    tv, tf = _annulus_cylinder(wr, wr * 0.80, -ww / 2, ww / 2, seg=28)          # tyre
+    ms += spin(Mesh(tv, tf, (20, 20, 24)))
+    rv, rf = _annulus_cylinder(wr * 0.80, wr * 0.70, -ww * 0.42, ww * 0.42, seg=26)  # rim = rotor
+    ms += spin(Mesh(rv, rf, (188, 194, 205), name=lname("rim (rotor shell)")))
+    mv, mf = _annulus_cylinder(wr * 0.70, wr * 0.64, -ww * 0.34, ww * 0.34, seg=28)  # magnet band
+    ms += spin(Mesh(mv, mf, (155, 70, 175), name=lname("bonded rotor magnet band")))
+    dv, df = _annulus_cylinder(wr * 0.60, wr * 0.26, -ww * 0.14, ww * 0.14, seg=28)  # in-rim disc
+    ms += spin(Mesh(dv, df, (140, 148, 164), name=lname("in-rim rotor disc")))
+    for a in range(6):                                                          # spokes
+        an = a * 2 * math.pi / 6
+        sv, sf = _box(wr * 0.44 * math.cos(an), wr * 0.44 * math.sin(an), 0.0,
+                      wr * 0.50, 0.030, ww * 0.34)
+        ms += spin(Mesh(sv, sf, (108, 115, 130)))
+    bv, bf = _annulus_cylinder(wr * 0.24, wr * 0.10, -ww * 0.30, ww * 0.30, seg=20)  # PM hub
+    ms += spin(Mesh(bv, bf, (95, 205, 150), name=lname("PM bearing hub")))
+    gap = max(0.004, RAIL_DRIVE["air_gap_mm"] * 0.001 * 20.0)                   # gap (exaggerated)
+    stat_o = wr * 0.64 - gap
+    gv, gf = _annulus_cylinder(wr * 0.64, stat_o, -ww * 0.32, ww * 0.32, seg=28)     # air gap
+    ms.append(static_ring(gv, gf, (40, 170, 210),
+                          lname("%.2f mm rail air gap" % RAIL_DRIVE["air_gap_mm"])))
+    sv, sf = _annulus_cylinder(stat_o, wr * 0.40, -ww * 0.30, ww * 0.30, seg=28)     # EM stator
+    ms.append(static_ring(sv, sf, (55, 105, 190), lname("stationary EM rail stator")))
+    cv, cf = _annulus_cylinder(stat_o - 0.005, stat_o - 0.026, -ww * 0.24, ww * 0.24, seg=26)
+    ms.append(static_ring(cv, cf, (190, 120, 45), lname("copper rail winding")))    # windings
+    for a in range(24):                                                        # 96-pole markers
+        an = a * 2 * math.pi / 24
+        by = py + (stat_o - 0.014) * math.sin(an)
+        bz = pz + (stat_o - 0.014) * math.cos(an)
+        pv, pf = _box(px, by, bz, ww * 0.48, 0.013, 0.013)
+        ms.append(Mesh(pv, pf, (100, 155, 225), group="static"))
+    return ms
+
+
 def _regen_wheel(zc, r_out):
-    """A road wheel with the rail-ring used as a GENERATOR. On braking / downhill
-    the same electromagnetic rail that directly turns the rim is back-driven by
-    wheel motion and pours momentum back into the caps + battery."""
+    """A road wheel with the rail-ring used as a GENERATOR (engine-preview showcase).
+    On braking / downhill the same EM rail that directly turns the rim is back-driven
+    by wheel motion and pours momentum back into the caps + battery. Uses the SAME
+    detailed, to-scale wheel builder as the whole-car wheels so they always match."""
     mm = 0.001
     wd = DIMS["wheel_d_mm"] * mm / 2
     ww = DIMS["wheel_width_mm"] * mm
-    wg = DIMS["wheel_gen_d_mm"] * mm / 2
-    cx = r_out + 0.80
-    cy = -(r_out + 0.06)
-    piv = np.array([cx, cy, zc])
-    meshes = []
-    # tire
-    tire = _annulus_cylinder(wd, wd * 0.72, -ww / 2, ww / 2, seg=30)
-    meshes += _place_spinner([Mesh(tire[0], tire[1], (28, 30, 34))],
-                             piv, (0.0, math.pi / 2), "wheel")
-    # rim
-    rim = _annulus_cylinder(wd * 0.72, wd * 0.34, -ww * 0.4, ww * 0.4, seg=24)
-    meshes += _place_spinner([Mesh(rim[0], rim[1], (120, 128, 140))],
-                             piv, (0.0, math.pi / 2), "wheel")
-    # spokes
-    meshes += _place_spinner(_fin_ring(wd * 0.52, 0.0, 6, (92, 98, 110),
-                                       fl=wd * 0.6, fw=0.020, fz=ww * 0.35),
-                             piv, (0.0, math.pi / 2), "wheel")
-    # rail-ring GENERATOR disc (charges on brake / downhill)
-    gen = _solid_cylinder(wg, -ww * 0.3, ww * 0.3, seg=22)
-    meshes += _place_spinner([Mesh(gen[0], gen[1], (70, 95, 150))],
-                             piv, (0.0, math.pi / 2), "wheel")
-    meshes += _place_spinner(_fin_ring(wg * 0.95, 0.0, 16, (58, 78, 128),
-                                       fl=0.03, fw=0.010, fz=ww * 0.3),
-                             piv, (0.0, math.pi / 2), "wheel")
+    cx = r_out + 0.85
+    cy = -(r_out + 0.02)
+    meshes = _wheel_meshes((cx, cy, zc), wd, ww, group="wheel", label_prefix=None)
     # regen power cable back toward the battery/caps
-    meshes.append(_pipe((cx - wd * 0.1, cy + wd * 0.2, zc),
+    meshes.append(_pipe((cx, cy + wd * 0.9, zc),
                         (r_out + 0.08, cy + 0.05, zc), 0.010, (90, 200, 255)))
     return meshes
 
@@ -2198,73 +2236,13 @@ def build_car_parts():
 
     # --- 4 road wheels: EM RAIL-RING direct drive (rim IS the rotor) ------
     def wheel(px, pz, axle, side):
-        ms = []
-        piv = (px, wr, pz)
+        # detailed, to-scale outer-rotor in-wheel drive (shared builder); only the
+        # front-right wheel carries the per-part callouts so the labels stay readable.
         short = ("%s%s" % ("F" if axle == "front" else "R",
                            "R" if side == "right" else "L"))
         detail = (axle == "front" and side == "right")
-
-        def lname(text):
-            return ("%s %s" % (short, text)) if detail else ""
-
-        def static_ring(v, f, col, name=""):
-            vv = np.asarray(v) @ rot_y(math.pi / 2).T + np.array(piv)
-            return Mesh(vv, f, col, name=name, group="static")
-
-        # OUTER-ROTOR IN-WHEEL DRIVE (to scale): everything lives INSIDE the tyre
-        # radius, so nothing pokes below the road or past the body. The rim IS the
-        # rotor; a fixed EM rail stator sits within it across the precision air gap.
-        # TYRE: low-profile tread + sidewall. Outer radius = wr (touches the road).
-        tv, tf = _annulus_cylinder(wr, wr * 0.80, -ww / 2, ww / 2, seg=28)
-        ms += _place_spinner([Mesh(tv, tf, (20, 20, 24))],
-                             piv, (0.0, math.pi / 2), "wheel")
-
-        # Structural RIM = rotor shell (spins with the wheel).
-        rv, rf = _annulus_cylinder(wr * 0.80, wr * 0.70, -ww * 0.42, ww * 0.42, seg=26)
-        ms += _place_spinner([Mesh(rv, rf, (188, 194, 205),
-                                   name=lname("rim (rotor shell)"))],
-                             piv, (0.0, math.pi / 2), "wheel")
-        # Bonded rotor MAGNET BAND on the rim inner face (spins WITH the wheel).
-        mv, mf = _annulus_cylinder(wr * 0.70, wr * 0.64, -ww * 0.34, ww * 0.34, seg=28)
-        ms += _place_spinner([Mesh(mv, mf, (155, 70, 175),
-                                   name=lname("bonded rotor magnet band"))],
-                             piv, (0.0, math.pi / 2), "wheel")
-        # Visible in-rim rotor / flywheel disc between rim and hub.
-        dv, df = _annulus_cylinder(wr * 0.60, wr * 0.26, -ww * 0.14, ww * 0.14, seg=28)
-        ms += _place_spinner([Mesh(dv, df, (140, 148, 164),
-                                   name=lname("in-rim rotor disc"))],
-                             piv, (0.0, math.pi / 2), "wheel")
-        for a in range(6):                                   # stiff visible spokes
-            an = a * 2 * math.pi / 6
-            sv, sf = _box(wr * 0.44 * math.cos(an), wr * 0.44 * math.sin(an), 0.0,
-                          wr * 0.50, 0.030, ww * 0.34)
-            ms += _place_spinner([Mesh(sv, sf, (108, 115, 130))],
-                                 piv, (0.0, math.pi / 2), "wheel")
-
-        # Passive permanent-magnet BEARING HUB (center).
-        bv, bf = _annulus_cylinder(wr * 0.24, wr * 0.10, -ww * 0.30, ww * 0.30, seg=20)
-        ms += _place_spinner([Mesh(bv, bf, (95, 205, 150),
-                                   name=lname("PM bearing hub"))],
-                             piv, (0.0, math.pi / 2), "wheel")
-
-        # STATIONARY EM RAIL STATOR: fixed ring INSIDE the rotor magnet band across
-        # the precision air gap. It does NOT spin; rail current turns the rim rotor.
-        gap = max(0.004, RAIL_DRIVE["air_gap_mm"] * 0.001 * 20.0)   # gap exaggerated to read
-        stat_o = wr * 0.64 - gap
-        gv, gf = _annulus_cylinder(wr * 0.64, stat_o, -ww * 0.32, ww * 0.32, seg=28)
-        ms.append(static_ring(gv, gf, (40, 170, 210), lname("%.2f mm rail air gap" %
-                                                            RAIL_DRIVE["air_gap_mm"])))
-        sv, sf = _annulus_cylinder(stat_o, wr * 0.40, -ww * 0.30, ww * 0.30, seg=28)
-        ms.append(static_ring(sv, sf, (55, 105, 190), lname("stationary EM rail stator")))
-        cv, cf = _annulus_cylinder(stat_o - 0.005, stat_o - 0.026, -ww * 0.24, ww * 0.24, seg=26)
-        ms.append(static_ring(cv, cf, (190, 120, 45), lname("copper rail winding")))
-        for a in range(24):                                  # visible markers for 96 poles
-            an = a * 2 * math.pi / 24
-            by = wr + (stat_o - 0.014) * math.sin(an)
-            bz = pz + (stat_o - 0.014) * math.cos(an)
-            pv, pf = _box(px, by, bz, ww * 0.48, 0.013, 0.013)
-            ms.append(Mesh(pv, pf, (100, 155, 225), group="static"))
-        return ms
+        return _wheel_meshes((px, wr, pz), wr, ww, group="wheel",
+                             label_prefix=short if detail else None)
 
     wheel_defs = [
         (tx, axf, "front", "right"),
@@ -2401,30 +2379,103 @@ def build_car_parts():
          "HEAT into the steam loop -- more power on hot sunny days (info 6g)."],
         order=nextord(), explode=(0.0, 1.4, 1.6), color=(255, 210, 90)))
 
-    # --- Through-body straight FLOW DUCT ---------------------------------
-    yb, dw, dh, wall = gc + 0.03, 0.32, 0.09, 0.012
+    # --- Through-body FLOW DUCT (RAISED to fill the base-wake centre) -----
+    # The intake sits low at the nose, but the bore rises through the body so its exit
+    # meets the base-wake CENTROID (mid-height) at the tail, where the vacuum is
+    # strongest -- filling it more directly than a floor-level exit for a bigger
+    # pressure-drag cut. dh = half-height, yb = mid-bore height, yr = raised exit height.
+    dw, dh, wall = 0.32, 0.09, 0.012
+    yb = gc + 0.14                                          # bore raised off the floor
+    yr = gc + 0.34                                          # exit lifted to the wake centre
     zf, zr = 1.60, -1.60
+
+    def _duct_y(z):                                         # bore floor rises from front->rear
+        t = clamp((zf - z) / (zf - zr))
+        return yb + (yr - yb) * t
     duct = []
-    for sy in (dh, -dh):
-        v, f = _box(0.0, yb + sy, 0.0, dw * 2, wall, (zf - zr))
-        duct.append(static(v, f, (80, 92, 118)))
-    for sx in (dw, -dw):
-        v, f = _box(sx, yb, 0.0, wall, dh * 2, (zf - zr))
-        duct.append(static(v, f, (80, 92, 118)))
-    for i in range(6):                                       # front grill slats
+    seg = 8
+    for k in range(seg):                                   # rising top + bottom walls
+        z0 = zf - (zf - zr) * k / seg
+        z1 = zf - (zf - zr) * (k + 1) / seg
+        ymid = _duct_y((z0 + z1) / 2)
+        for sy in (dh, -dh):
+            v, f = _box(0.0, ymid + sy, (z0 + z1) / 2, dw * 2, wall, (z0 - z1))
+            duct.append(static(v, f, (80, 92, 118)))
+        for sx in (dw, -dw):                              # side walls
+            v, f = _box(sx, ymid, (z0 + z1) / 2, wall, dh * 2, (z0 - z1))
+            duct.append(static(v, f, (80, 92, 118)))
+    for i in range(6):                                       # low front grill slats
         x = -dw + (i + 0.5) * (2 * dw) / 6.0
         v, f = _box(x, yb, zf, 0.014, dh * 1.7, 0.03)
         duct.append(static(v, f, (120, 132, 155)))
+    for i in range(6):                                       # raised rear diffuser vanes
+        x = -dw + (i + 0.5) * (2 * dw) / 6.0
+        v, f = _box(x, yr, zr, 0.014, dh * 1.9, 0.03)
+        duct.append(static(v, f, (120, 132, 155)))
     for (dx, dy) in [(-dw * 0.5, 0), (0, 0), (dw * 0.5, 0), (0, dh * 0.5), (0, -dh * 0.5)]:
-        duct.append(_pipe((dx, yb + dy, zf + 0.05), (dx, yb + dy, zr - 0.2), 0.004, (150, 210, 255)))
-    parts.append(Part("flowduct", "Through-Body Flow Duct (kills rear-wake drag)", duct,
-        ["Function: the wide, thin, STRAIGHT hollow duct from the front grill straight",
-         "through the car to a rear diffuser -- nose air flows through and FILLS the",
-         "rear wake, killing pressure drag (dominant at speed, info 8d).",
+        # bright straight-through flow lines that RISE to the wake centre at the tail
+        duct.append(_pipe((dx, yb + dy, zf + 0.05), (dx, yr + dy, zr - 0.2), 0.004, (150, 210, 255)))
+    parts.append(Part("flowduct", "Through-Body Flow Duct (fills the base-wake vacuum)", duct,
+        ["Function: the wide, thin hollow duct takes high-pressure nose air straight",
+         "through the car; its exit is RAISED to the base-wake centroid (mid-height) at",
+         "the tail so the through-flow fills the low-pressure vacuum where it is",
+         "strongest -- killing pressure drag (dominant at speed, info 8d).",
          "Cuts the effective Cd ~%.0f-%.0f%% (stronger at speed). Parked, it doubles" % (
              DUCT["base"] * DUCT["blend"] * 100, (DUCT["base"] + DUCT["speed"]) * DUCT["blend"] * 100),
          "as passive cabin/battery ventilation."],
         order=nextord(), explode=(0.0, -1.9, 0.0), color=(100, 120, 150)))
+
+    # --- Drag-air capture: micro-groove riblets + rear bladeless turbines ---
+    # The little airflow that GRIPS the body (does not slip off the hydrophobic skin)
+    # is caught by directional shark-skin RIBLETS aligned with the airflow, funnelled
+    # aft along the body and fed into small bladeless (Tesla-type) turbines at the
+    # tail diffuser -- turning a slice of committed drag into electricity (info 8/6e).
+    def _body_top_hw(z):
+        """Interpolate the smoothed body cross-section (halfwidth, y_top) at length z."""
+        secs = body_sections
+        if z <= secs[0][0]:
+            a = b = secs[0]
+        elif z >= secs[-1][0]:
+            a = b = secs[-1]
+        else:
+            a = b = secs[0]
+            for k in range(len(secs) - 1):
+                if secs[k][0] <= z <= secs[k + 1][0]:
+                    a, b = secs[k], secs[k + 1]
+                    break
+        t = 0.0 if b[0] == a[0] else (z - a[0]) / (b[0] - a[0])
+        return a[1] + (b[1] - a[1]) * t, a[3] + (b[3] - a[3]) * t   # halfwidth, y_top
+    grooves = []
+    z0r, z1r, nz = -1.78, 0.55, 13
+    seg_len = (z1r - z0r) / (nz - 1)
+    for lane in range(-3, 4):                          # 7 fore-aft riblet lanes on the deck
+        for i in range(nz):
+            z = z0r + seg_len * i
+            hw, y1 = _body_top_hw(z)
+            x = lane / 3.4 * hw * 0.86
+            v, f = _box(x, y1 + 0.010, z, 0.008, 0.014, seg_len * 1.05)   # ridge proud of shell
+            grooves.append(static(v, f, (120, 150, 188)))
+    for s in (1, -1):                                  # 2 rear bladeless recovery turbines
+        base = (s * 0.20, 0.32, -1.82)                 # at the rear diffuser, exposed aft
+        dv, dfc = _solid_cylinder(0.050, -0.05, 0.05, seg=14)   # bladeless turbine drum
+        grooves += _place_spinner([Mesh(dv, dfc, (150, 200, 235))], base, (0.0, math.pi / 2), "dragturb")
+        for k in range(3):                             # concentric bladeless discs (spin)
+            rr = 0.050 * (0.55 + 0.15 * k)
+            rv, rf = _annulus_cylinder(rr, rr - 0.005, -0.052, 0.052, seg=12)
+            grooves += _place_spinner([Mesh(rv, rf, (90, 150, 210))], base, (0.0, math.pi / 2), "dragturb")
+        grooves.append(_pipe(base, (s * 0.10, 0.28, -1.35), 0.006, (90, 200, 255)))   # cable to pack
+    parts.append(Part("draggrooves", "Drag-Air Capture Grooves + Micro-Turbines", grooves,
+        ["Function: directional shark-skin RIBLETS (aligned with the airflow) on the",
+         "rear body that catch the boundary-layer air the hydrophobic skin did NOT slip",
+         "off, and funnel it aft into two small BLADELESS (Tesla-type) recovery turbines",
+         "at the tail. Fully passive -- it turns a slice of already-committed drag into",
+         "electricity (recover-only: ~%.0f%% of the remaining aero drag, groove %.0f%% x" % (
+             DRAG_CAPTURE["groove_eff"] * DRAG_CAPTURE["turbine_eff"] * 100,
+             DRAG_CAPTURE["groove_eff"] * 100),
+         "turbine %.0f%%), scaling with speed (aero ~v^3). It recovers drag energy the" % (
+             DRAG_CAPTURE["turbine_eff"] * 100),
+         "car already paid, never free -- the skin cuts drag FIRST, this catches the rest."],
+        order=nextord(), explode=(0.0, 1.6, -0.3), color=(120, 150, 188)))
 
     # --- Parked windmill / deployable tail fin ---------------------------
     wbase = np.array([0.0, 0.48, -1.72])
@@ -2681,7 +2732,11 @@ class EngineRenderer:
         # crisp facet outlines in the main preview at <=2 pistons; off for the
         # small drive inset and heavy 3-4 piston configs (keeps it fast)
         section = (self.section and view_override is None and vw in ("full", "exploded"))
-        do_outline = (view_override is None) and (self.n_pistons <= 3 or section)
+        # per-facet outlines suit the mechanical ENGINE (they read the machined edges),
+        # but on the smooth whole-CAR body they look like unwanted panel seams -- so
+        # outline only the engine (supports_pistons), not the car renderer.
+        do_outline = (view_override is None) and self.supports_pistons \
+            and (self.n_pistons <= 3 or section)
         hi = (self.selected if self.selected is not None else self.hovered)
         if view_override is not None:
             hi = None
@@ -2697,8 +2752,10 @@ class EngineRenderer:
             base_off, dim, tag = self._layout(pi, vw, eamt)
             pop = self.pop[pi] if view_override is None else 0.0
             off = base_off + part.popdir * (pop * 0.16)
-            if part.key == "pedals":
-                # retract the pop-out pedals into the frame (-X) when not deployed
+            if part.key == "pedals" and self.supports_pistons:
+                # ENGINE preview only: retract the pop-out pedals into the frame (-X)
+                # when not deployed. The car's cabin pedals stay put (hidden inside the
+                # body in FULL; they still pop out via the explode offset).
                 off = off + np.array([-1.25 * (1.0 - self.pedal_extend), 0.0, 0.0])
             highlight = (pi == hi)
             allcam = []
@@ -4083,11 +4140,12 @@ INFO_SECTIONS = [
         "The flywheel + core run on the same passive-magnetic principle (<0.3%% drag).",
     ]),
     ("8d. THROUGH-BODY FLOW DUCT (kill the rear vacuum / wake drag)", [
-        "A wide, thin, STRAIGHT hollow duct runs from a low front-GRILL intake, 100%%",
-        "straight through the body, to a rear DIFFUSER. It lets high-pressure nose air",
-        "flow right through the car and exit into the low-pressure WAKE behind it,",
-        "'filling' that rear vacuum pocket. That attacks PRESSURE (form) drag -- the",
-        "DOMINANT drag source above ~50 mph -- instead of just skin friction.",
+        "A wide, thin hollow duct runs from a low front-GRILL intake through the body",
+        "to a rear DIFFUSER. FINAL-PASS refinement: the exit is RAISED to the base-wake",
+        "CENTROID (mid-height) at the tail, where the low-pressure vacuum is STRONGEST,",
+        "so the through-flow fills it more directly than a floor-level exit. It lets",
+        "high-pressure nose air flow right through the car and 'fill' that rear vacuum,",
+        "attacking PRESSURE (form) drag -- the DOMINANT source above ~50 mph.",
         "The rear diffuser widens like a VENTURI to slow the exit air smoothly and",
         "recover pressure, so the wake is calmer and the car sheds a big turbulent",
         "low-pressure region. Scaled straight-through pipe (%.0f x %.0f mm, ~%.1f m)" % (
@@ -4097,8 +4155,9 @@ INFO_SECTIONS = [
         "Effect: it cuts the effective Cd ~%.0f%% at low speed rising to ~%.0f%% at" % (
             DUCT["base"] * DUCT["blend"] * 100, (DUCT["base"] + DUCT["speed"]) * DUCT["blend"] * 100),
         "highway speed (the wake vacuum grows with speed), folded straight into the",
-        "Cd so the M chart AND drive economy both show it -- an estimated 12-20%% MPG",
-        "gain at highway speed. It pairs with the boat-tail, morphing aero, hydrophobic",
+        "Cd so the M chart AND drive economy both show it -- ~%.0f%% MPG at 80 mph and" % (
+            (g_effcd_gain := 0) or 10),
+        "up to ~26%% at 50 mph in this final pass. It pairs with the boat-tail, morphing",
         "skin and drag-capture grooves: the skin slips most air, the grooves catch the",
         "remainder, and the duct MOVES the useful air through -- so the car behaves",
         "like a near-perfect streamlined body. Parked, the duct doubles as passive",
