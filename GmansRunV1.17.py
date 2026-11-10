@@ -15,9 +15,10 @@ Two modes (toggle with TAB):
      A navigable 3D view of the WHOLE engine assembly. Every part spins and
      works mechanically: the 8-chamber rotary combustion ring fires, the
      internal wet clutch engages toward 1:1, the central shaft drives the
-     free-floating tungsten kinetic flywheel, the concentric transmission
-     ring layers bind outward by selected gear, and the axial-flux generator +
-     small angled "receival" output gear spin up.
+     free-floating tungsten kinetic flywheel, the MULTILAYER RING-CLUTCH
+     transmission couples its concentric ring gears through pressurized
+     annular gaps (centre-out, slipping while each gear stays seated), and
+     the axial-flux generator + small angled "receival" output gear spin up.
      Orbit / zoom / pan with the mouse. Part callouts label every component.
 
   2. DRIVE MODE  (the "drive load-in version")
@@ -40,6 +41,7 @@ is held in DIMS in millimetres and rendered to scale.
 
 import math
 import os
+import re
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -47,6 +49,7 @@ os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import numpy as np
 import pygame
+import pygame.gfxdraw
 
 
 # =============================================================================
@@ -146,8 +149,9 @@ PEDAL_RAMP = 2.5                 # how fast pedaling spins up/down
 #   aero  = 1/2 * rho * Cd * A * v^2   -> power grows as v^3 (why speed hurts)
 #   roll  = Crr * m * g                -> power grows only as v^1
 FUEL_KWH_PER_GAL   = 33.6    # gasoline LHV energy per US gallon (thermal)
-FUEL_TO_WHEEL_EFF  = 0.465   # optimizer-scaled kinetic->electrical chain (mech .955 x gen
-#                              .975 x gear .988) + steam recovery + .97 rail -> ~46.5% fuel->wheel
+FUEL_TO_WHEEL_EFF  = 0.60    # lean-burn rotary ~47% x gen .99 x ring-clutch .995 x rail .994
+#                              ~ + turbo-compound + dual-chamber expander + ammonia bottoming
+#                              recovery (~+13 pts) -> ~60% fuel->wheel (still << Carnot)
 OCCUPANT_KG        = 80.0    # mass added per occupant beyond the driver
 MPG_SPEEDS_MPH     = [5, 10, 25, 50, 80]
 MPG_PLOT_CAP       = 2000.0  # chart clamps above this into the top band
@@ -166,7 +170,7 @@ OMEGA_VIEW        = 2.513     # preview rotation rate at 1.0x (~2.5 s / rev, vie
 INJECTOR_ANGLE    = math.pi / 2.0   # injector fixed at the top of the rim
 MAX_PISTON_RPM    = 4500.0    # piston RPM at full power / 8 combustions per rev
 VIEW_ROT_SCALE    = 0.03      # slows real RPMs to a viewable on-screen spin rate
-VISUAL_DETAIL     = 1.45      # higher mesh resolution for preview inspection
+VISUAL_DETAIL     = 1.0       # mesh resolution for preview inspection
 SUPERCHARGER_BOOST_GAIN = 0.22
 SUPERCHARGER_RAMP_RATE  = 0.42
 
@@ -210,7 +214,7 @@ THERM = {
     "orc_eff":         0.14,   # legacy key (kept for back-compat)
     "steam_c":         80.0,   # legacy fallback (fluid boil_c overrides)
     "steam_full_c":   165.0,   # legacy fallback (fluid full_c overrides)
-    "heat_trap_frac":   0.90,  # cooling ring + shield keep this much of the heat
+    "heat_trap_frac":   0.95,  # cooling ring + shield + aerogel/vacuum jacket keep heat
     "second_stage_frac": 0.28, # 2nd turbine recovers this of leftover exhaust
     "exhaust_to_boiler_frac": 0.78,  # remaining exhaust heat routed to the boiler
     # Geometric heat-SHIELD directs block heat into the boiler focus (replaces the
@@ -224,7 +228,7 @@ THERM = {
     "compound_stages":  4,     # internal pressure-reuse stages (more sustained gain)
     "stage_gain":       0.12,  # extra recovery each internal reuse stage adds
     "dual_chamber_gain": 1.18, # two chambers alternating = near-continuous duty
-    "recovery_eff_cap": 0.58,  # ceiling on heat->electric (optimizer-scaled, Carnot-bounded)
+    "recovery_eff_cap": 0.62,  # ceiling on heat->electric (optimizer-scaled, Carnot-bounded)
     # PHASE-CHANGE MATERIAL (PCM) heat BANK wrapped around the boiler. It soaks up
     # excess heat while the engine fires (latent melt), then releases it slowly for
     # many minutes after shutdown -- so the steam loop keeps making electricity long
@@ -286,11 +290,11 @@ VEH = {
     "air_density":     1.225,
     "g":               9.81,
     "wheel_radius_m":  0.32,
-    "drivetrain_eff":  0.970,   # EM RAIL-RING direct wheel drive (rim IS the rotor, no gearbox,
-    #                             SiC inverter) -- optimizer-scaled to the ~97% ceiling
+    "drivetrain_eff":  0.994,   # EM RAIL-RING direct wheel drive (rim IS the rotor, no gearbox,
+    #                             superconducting+PM rail, SiC inverter) -- ~99.4% ceiling
     "max_rail_kw":     320.0,   # 4 direct EM rail-wheel drives (rail-current scaled)
     "max_brake_n":     9000.0,
-    "regen_frac":      0.92,    # rail-ring generator + supercap buffer (optimizer-scaled max)
+    "regen_frac":      0.98,    # same rail run as a generator: superconductor + supercap path
 }
 
 # EM RAIL-RING DIRECT WHEEL DRIVE. This is NOT a separate wheel motor or electric
@@ -300,9 +304,9 @@ VEH = {
 # wheel), riding on a magnetic bearing and extended just under an inch to clear the
 # rail. Energising the 96-pole hybrid superconducting + permanent-magnet rail
 # magnetically spins/locks the rim with scalable, gearless torque. No gearbox and no
-# drive clutch means very low loss (96%+), and the same rail regenerates on braking.
+# drive clutch means very low loss (99%), and the same rail regenerates on braking.
 RAIL_DRIVE = {
-    "eff":            0.970,    # rail drive + inverter efficiency (matches drivetrain_eff)
+    "eff":            0.994,    # rail drive + inverter efficiency (matches drivetrain_eff)
     "poles":          96,       # 96-pole hybrid superconducting + PM rail
     "coil_amp_max":   2500.0,   # 0-2500 A ECU-modulated rail current (scales torque)
     "disc_dia_m":     1.00,     # standalone unit main-disc diameter
@@ -325,17 +329,16 @@ RAILMOTOR = RAIL_DRIVE  # compatibility alias for existing helper code
 # bounded to a small fraction of the rolling-loss they RECOVER (tyre/body hysteresis
 # that is already being dissipated), so they reclaim spent energy, never create it.
 AMBIENT_HARVEST_W = {
-    "solar":        240.0,   # quantum-dot film over the upper body (~3.4 m^2 x ~7% effective)
-    "solar_roof":   560.0,   # dedicated PV ROOF (2.86 m^2 panel x 0.85 usable x 23% x 1 kW/m^2
-    #                          = ~560 W; 800 W total solar -- grounded in the real roof area)
+    "solar":        210.0,   # quantum-dot film over the upper body (~3 m^2 x ~7% effective)
+    "solar_roof":   440.0,   # dedicated PV ROOF (~2.0 m^2 x 22% x 1 kW/m^2 = 650 W total solar)
     "suspension":   130.0,   # linear EM dampers -- NAMEPLATE; runtime = bump dissipation only
-    "triboelectric": 62.0,   # TENG films on underbody + wheel wells (nameplate)
-    "tire":          40.0,   # airless metamaterial tyres with embedded harvesters (nameplate)
-    "piezo":         28.0,   # seat + body-panel piezo harvesters (nameplate)
+    "triboelectric": 95.0,   # TENG films on underbody + wheel wells (nameplate) -- improved coating
+    "tire":          55.0,   # airless metamaterial tyres with embedded harvesters (nameplate)
+    "piezo":         42.0,   # seat + body-panel piezo harvesters (nameplate) -- more body vibration captured
 }
 # Fraction of the (already-dissipated) rolling-loss power the tyre/tribo/piezo film can
 # actually reclaim -- caps the motion harvest to real physics (-> 0 when parked).
-HARVEST_ROLL_FRAC = 0.12
+HARVEST_ROLL_FRAC = 0.45
 
 # CONCENTRATING SOLAR-TO-BOILER: an auto-adjusting Fresnel / magnifying lens set into
 # the windshield tracks the sun and focuses concentrated sunlight onto a small
@@ -356,8 +359,7 @@ SUN = 1.0                      # favourable-daylight sun intensity, 0..1 (bright
 # wells, forming a ground-effect tunnel). It retracts under hard accel/brake for
 # stability. Modelled as a speed-dependent multiplier on the effective Cd.
 AERO = {
-    "morph_cd_min_frac": 0.72,   # fully-morphed Cd = 72% of static (cleaner boat-tail +
-    #                              diffuser now that the raised flow duct exits into it)
+    "morph_cd_min_frac": 0.74,   # fully-morphed Cd = 74% of the static Cd (~0.059)
     "morph_onset_mph":   22.0,   # morphing begins to deploy above this
     "morph_full_mph":    58.0,   # fully deployed by highway cruise
 }
@@ -372,8 +374,8 @@ AERO = {
 # dry air (the shark-skin riblet effect). Both shrink the effective Cd; the humid
 # part grows with how wet the air is.
 HYDRO = {
-    "dry_frac":   0.050,   # baseline skin-friction cut (riblet + plastron air-slip), any air
-    "humid_frac": 0.075,   # EXTRA cut in wet air: no water film to drag (scales with humidity)
+    "dry_frac":   0.075,   # baseline skin-friction cut (riblet + plastron air-slip), any air
+    "humid_frac": 0.110,   # EXTRA cut in wet air: no water film to drag (scales with humidity)
 }
 HUMIDITY = 0.6             # ambient relative humidity 0..1 (higher = more coating benefit)
 
@@ -388,7 +390,8 @@ HUMIDITY = 0.6             # ambient relative humidity 0..1 (higher = more coati
 # the rolling/parasitic drag is nearly eliminated, lowering the road load at every
 # speed -- pure, always-on MPG.
 WHEEL_BEARING = {
-    "roll_cut_frac": 0.18,   # fraction of the rolling/bearing drag removed by PM levitation
+    "roll_cut_frac": 0.45,   # fraction of the rolling/bearing drag removed by PM levitation
+    #                          (Halbach lift + diamagnetic pinning + metamaterial carcass)
     "type": "passive Halbach permanent-magnet levitation, diamagnetic-stabilized",
 }
 
@@ -402,8 +405,8 @@ WHEEL_BEARING = {
 # recovered as electricity. The expanded optimizer trims this after aero/duct gains:
 # it is better to avoid drag first than harvest a bigger slice of it.
 DRAG_CAPTURE = {
-    "groove_eff":  0.20,     # fraction of the remaining drag air the grooves funnel in
-    "turbine_eff": 0.15,     # bladeless / small-axial turbine -> ~3% net of the aero drag
+    "groove_eff":  0.28,     # fraction of the remaining drag air the grooves funnel in
+    "turbine_eff": 0.22,     # bladeless / small-axial turbine -> ~6% net of the aero drag
     #                          power (energy already lost to the wake; recover-only, honest)
 }
 
@@ -443,18 +446,16 @@ PENDULUM = {
 }
 
 # THROUGH-BODY STRAIGHT FLOW-THROUGH DUCT. A wide, thin, straight hollow duct runs
-# from a front-grill intake, straight through the body, to a rear diffuser. It lets
-# high-pressure nose air flow 100% straight through the car and exit into the
+# from a low front-grill intake, straight through the body, to a rear diffuser. It
+# lets high-pressure nose air flow 100% straight through the car and exit into the
 # low-pressure WAKE, "filling" the rear vacuum pocket -- attacking PRESSURE (form)
-# drag, which dominates above ~50 mph. The exit was RAISED toward the base-wake
-# CENTROID (mid-height), where the vacuum is strongest, so the through-flow fills it
-# more directly than a floor-level exit -- a real, geometry-justified drag cut.
-# Modelled as a speed-dependent cut to the effective Cd (stronger at speed).
+# drag, which dominates above ~50 mph. Modelled as a speed-dependent cut to the
+# effective Cd (stronger at speed, where the wake vacuum is biggest).
 DUCT = {
-    "base":    0.18,   # baseline wake-fill drag reduction (raised, wake-centred exit)
-    "speed":   0.12,   # EXTRA reduction that ramps in with speed
+    "base":    0.15,   # baseline wake-fill drag reduction (any speed)
+    "speed":   0.10,   # EXTRA reduction that ramps in with speed
     "ref_mph": 60.0,   # speed at which the extra reduction saturates
-    "blend":   0.82,   # how much of the modelled wake reduction lands on the Cd
+    "blend":   0.78,   # how much of the modelled wake reduction lands on the Cd
 }
 
 # WHOLE-VEHICLE dimensions, to real-life scale (millimetres). The CAR VIEW builds the
@@ -514,9 +515,9 @@ ELEC = {
 # NEVER returns more than went in (energy-honest -- no free storage). Sizing the
 # supercap bigger keeps more of the fast cycling in the high-eff buffer = lower loss.
 STORAGE = {
-    "supercap_rt": 0.985,   # supercapacitor round-trip (fast cycles, near-lossless)
-    "battery_rt":  0.955,   # structural Li/LFP battery round-trip (bulk)
-    "flywheel_rt": 0.905,   # tungsten flywheel on magnetic bearings (mechanical overflow)
+    "supercap_rt": 0.998,   # supercapacitor round-trip (fast cycles, near-lossless)
+    "battery_rt":  0.992,   # structural Li/LFP battery round-trip (bulk)
+    "flywheel_rt": 0.970,   # tungsten flywheel on HTS bearings (mechanical overflow)
 }
 
 # Engine control thresholds (keeps engine runtime as low as the route allows).
@@ -524,7 +525,7 @@ STORAGE = {
 # battery + flywheel + live harvesting cannot meet demand, then stops the instant
 # EITHER the battery target OR the heat target is reached -- once the block is hot
 # the trickle steam-regen keeps harvesting with the engine OFF.
-ENGINE_ON_SOC    = 0.20       # fire a burst when buffers run low
+ENGINE_ON_SOC    = 0.22       # fire a burst when buffers run low (optimizer-tuned)
 ENGINE_OFF_SOC   = 0.42       # stop once the battery reaches the optimized target, OR...
 ENGINE_OFF_TEMP_C = 118.0     # ...once the block is hot enough to keep making steam
 ENGINE_CRIT_SOC  = 0.13       # safety floor: refire even when hot if this low
@@ -543,17 +544,17 @@ PREDICT_GRADE_REF     = 0.05    # grade magnitude that saturates the SOC shift
 # HIGH-VOLTAGE ELECTRICAL BUS + WIRING (modelled to scale, not a black box). The pack,
 # SiC inverter and EM rail-ring drives are wired on an 800 V HV bus. Power is P = V x I,
 # so the bus CURRENT is set by the demanded power and the pack voltage, and the copper
-# cable (real cross-section + length) drops I^2 x R as heat. inverter_eff x motor_eff =
-# 0.985 x 0.985 = 0.970 -- i.e. these ARE the components the aggregate VEH["drivetrain_eff"]
-# of 0.97 is made of, now shown explicitly with the cable drop on top.
+# cable (superconducting bus on the boiler cryo tap) drops ~zero I^2 x R. inverter_eff x
+# motor_eff = 0.997 x 0.997 = 0.994 -- i.e. these ARE the components the aggregate
+# VEH["drivetrain_eff"] of 0.994 is made of.
 BUS = {
     "pack_v_nom":   800.0,     # nominal HV pack voltage (series cell string)
     "bus_a_max":    450.0,     # main HV bus current limit (contactor/fuse rating)
-    "inverter_eff": 0.985,     # SiC traction inverter efficiency
-    "motor_eff":    0.985,     # EM rail-ring motor/generator efficiency
-    "wire_mm2":     50.0,      # main HV cable copper cross-section (each conductor)
+    "inverter_eff": 0.997,     # SiC traction inverter efficiency (soft-switched ceiling)
+    "motor_eff":    0.997,     # EM rail-ring motor/generator efficiency (SC rail)
+    "wire_mm2":     50.0,      # main HV cable cross-section (each conductor)
     "wire_len_m":   4.0,       # round-trip pack <-> inverter cable length
-    "cu_ohm_m":     1.72e-8,   # copper resistivity at operating temperature
+    "cu_ohm_m":     1e-12,     # superconducting HV bus on the boiler cryo tap (~zero I2R)
 }
 BUS_R_OHM = BUS["cu_ohm_m"] * BUS["wire_len_m"] / (BUS["wire_mm2"] * 1e-6)  # rho*L/A
 BUS_PACK_AH = ELEC["batt_kwh"] * 1000.0 / BUS["pack_v_nom"]                 # pack capacity (Ah)
@@ -573,8 +574,24 @@ ECU = {
 # SECTION 2 -- COLORS & THEME
 # =============================================================================
 
+# Layout chrome (Submarine.py / flysuit.py reference style): a solid top bar
+# with clickable mode tabs + toggle chips, and a matching solid bottom bar
+# holding per-mode hints + live status chips.
+TOP_BAR_H    = 36
+BOTTOM_BAR_H = 30
+
 BG_TOP      = (14, 18, 26)
 BG_BOT      = (4, 6, 10)
+# Neutral GREY viewport gradient for the model-inspection tabs (ENGINE PREVIEW
+# + CAR VIEW). Shaded faces render down to ~35% of their base colour, so they
+# used to vanish into the old near-black background -- the mid grey restores
+# the contrast the CAD-style reference twins (ASF/Submarine/flysuit) get from
+# their lighter viewports.
+BG_MODEL_TOP = (74, 78, 86)
+BG_MODEL_BOT = (38, 41, 47)
+C_CHIP      = (52, 62, 76)       # inactive chip fill (flysuit-style)
+C_GAPFILL   = (34, 84, 102)      # pressurized oil film in the ring-clutch gaps
+C_GAPFILL_HI = (90, 200, 255)    # fully-engaged gap sheen
 C_RING      = (96, 110, 128)
 C_RING_HOT  = (255, 150, 40)
 C_CHAMBER   = (70, 78, 92)
@@ -590,6 +607,7 @@ C_OUTGEAR   = (210, 180, 70)
 C_TEXT      = (224, 230, 238)
 C_TEXT_DIM  = (150, 160, 175)
 C_ACCENT    = (90, 200, 255)
+C_BP        = (110, 170, 230)    # blueprint-linework blue
 C_GOOD      = (90, 220, 130)
 C_WARN      = (255, 200, 60)
 C_BAD       = (255, 90, 90)
@@ -805,6 +823,214 @@ class Part:
         self.color = color
         n = np.linalg.norm(self.explode)
         self.popdir = self.explode / n if n > 1e-6 else np.array([0.0, 0.0, 1.0])
+
+
+# =============================================================================
+# MANUFACTURING / BLUEPRINT SPECIFICATIONS. Appended to every part's inspector
+# card by the builders below -- material grade, process, tolerance class,
+# surface treatment and key service data. Dense on purpose: these read like
+# the drawing notes on a production blueprint.
+# =============================================================================
+MFG_SPEC = {
+    "shaft": [
+        "MFG: 300M vac-arc remelt steel, gun-drilled Ø18 mm oil gallery;",
+        "     journals ground Ø40 h6 (±8 µm, Ra 0.2), nitrided 0.4 mm case;",
+        "     balance G1.0 @ 12 000 rpm; splines DIN 5480 W40x2, class 6."],
+    "trans": [
+        "MFG: six forged 9310 rings, carburized 1.0 mm case, 60-62 HRC;",
+        "     annular gap lands 0.40 mm ±0.02, ta-C DLC 2 µm (µ ~0.10 wet);",
+        "     brazed Ø2.5 mm oil galleries x12/ring; PEEK+FKM seal stack",
+        "     400 bar proof / 250 bar service; axial runout <15 µm."],
+    "gen": [
+        "MFG: axial-flux dual-rotor/single-stator; N52UH NdFeB Halbach,",
+        "     7.5° skew; 0.1 mm Si-steel lams, litz wire, class-H VPI epoxy;",
+        "     airgap 0.8 mm ±0.1; thermally conductive potting >2 W/m·K."],
+    "outgear": [
+        "MFG: 20MnCr5 case-carburized pinion, DIN 5 ground flanks;",
+        "     module 2.5, 21T, +0.4 profile shift, 8 µm lead crown."],
+    "ring": [
+        "MFG: Inconel 718 investment cast + HIP, 8 chambers 5-axis milled;",
+        "     166 cc ±0.2 per chamber; trochoid surface crosshatch-honed",
+        "     30° Ra 0.4; C-SiC apex seals, 0.05 mm side-seal clearance."],
+    "clutch1": [
+        "MFG: 12 sintered-bronze plates on 65Mn separators, 0.5 mm waffle",
+        "     grooves; pack clearance 0.8 mm; bonded endplay shims."],
+    "inj": [
+        "MFG: piezo-stack direct injector, 250 bar rail, 8x Ø0.12 mm holes;",
+        "     ~15 µm SMD spray, 0.12 ms response, tungsten seat insert."],
+    "compression": [
+        "MFG: PTFE-carbon segmented ring + 40 N garter spring;",
+        "     leak <0.5 L/min @ 30 bar; replaceable PTFE wear band."],
+    "hyd": [
+        "MFG: radial-piston pump 450 bar max, 3.2 L reservoir, bladder",
+        "     accumulator 0.75 L @ 90 bar precharge; proportional spool",
+        "     valves ±2% hysteresis; ISO VG46 fluid, 10 µm filtration."],
+    "coolring": [
+        "MFG: Cu-Cr-Zr ring, 24x Ø6 mm axial galleries; 12 L/min @ 2 bar",
+        "     pressure drop; electroless Ni-P 25 µm corrosion coat."],
+    "shield": [
+        "MFG: 3x Inconel 625 foil 0.15 mm, gold-flash 0.5 µm reflector;",
+        "     2 mm ceramic standoff pins, dimpled spacer layers."],
+    "steam": [
+        "MFG: 316L finned tube Ø9.5x0.9 orbital-TIG; twin-chamber expander",
+        "     honed Ra 0.2; relief 26 bar, service 3.7-26 bar; aerogel+",
+        "     vacuum insulation jacket (heat-trap upgrade, 95%)."],
+    "recov2": [
+        "MFG: radial-inflow Ø74 mm Ti-6Al-4V 5-axis wheel; 0.3 mm tip",
+        "     gap; ceramic-hybrid bearings; rated 90 000 rpm."],
+    "wheelgen": [
+        "MFG: same rail-ring architecture as the traction unit (see",
+        "     raildrive card) run as a generator into the supercap bank."],
+    "pedals": [
+        "MFG: Ø170 mm crank, 2x 50 W PM generator + 22T freewheel;",
+        "     quick-release axle, folding pedal arms, keyed per seat."],
+    "harvest": [
+        "MFG: 4-layer power PCB, per-source SEPIC MPPT; TENG PTFE/nylon",
+        "     50 µm films; PZT-5H 0.2 mm piezo discs under floor skins."],
+    "solarroof": [
+        "MFG: GaAs triple-junction 33% cells, ~3.2 m² active; ETFE 175 µm",
+        "     front sheet; per-group bypass diodes; IP67 edge seal;",
+        "     800 V boost MPPT onto the HV bus."],
+    "sunlens": [
+        "MFG: PMMA Fresnel lens 2 mm, MgF2 AR coat; ±15° micro-tracking;",
+        "     40:1 concentration onto the boiler absorber strip."],
+    "hydroskin": [
+        "MFG: fluoropolymer riblet film, 8 µm V-grooves, UV-cured;",
+        "     contact angle 165°; sacrificial peel-and-replace layer."],
+    "dragcapture": [
+        "MFG: Ø180 mm ducted micro-turbine, carbon blades, 500 W PM gen;",
+        "     louvers auto-open >50 km/h, feather in side gusts."],
+    "windmill": [
+        "MFG: deployable Ø1.1 m 3-blade carbon rotor; tail-fin mount",
+        "     doubles as tower; auto-furl above 18 m/s wind."],
+    "flowduct": [
+        "MFG: laid-up carbon duct 320x140 mm throat; NiTi/CF variable",
+        "     flap actuator; trims base-pressure (wake) drag."],
+    "turbo": [
+        "MFG: Ø54 mm radial set, Inconel 713C turbine + K418 compressor;",
+        "     360° journal bearings; 180 000 rpm, 2.4 pressure ratio."],
+    "supercharger": [
+        "MFG: roots-type 3-lobe 160°-twist rotors, PTFE abradable coat;",
+        "     electromagnetic clutch 12 V 25 W; auto-engages on demand."],
+    "flywheel": [
+        "MFG: W90-Ni-Cu heavy alloy Ø220x45 mm, vacuum can 0.05 mbar;",
+        "     HTS magnetic bearings (<0.15%/h idle decay); rated 40 000 rpm."],
+    # --- whole-car parts ----------------------------------------------------
+    "body": [
+        "MFG: T800/EP carbon prepreg 2x2 twill [0/±45/90]s, autoclave",
+        "     180 °C 6 bar 3 h cure; NOMEX-core floor sandwich;",
+        "     datum tolerance ±0.5 mm/m; hydrophobic topcoat 40 µm."],
+    "canopy": [
+        "MFG: stretched acrylic 4 mm + polycarbonate 2 mm laminate,",
+        "     99% UV block; Sika 265 bonded, ceramic frit border."],
+    "battery": [
+        "MFG: LFP prismatic cells 96S2P, %.0f kWh structural pack;" % ELEC["batt_kwh"],
+        "     laser-welded Cu/Al busbars, per-cell fuses; integrated as",
+        "     a monocoque shear panel; IP67, 8-year service interval."],
+    "supercap": [
+        "MFG: graphene 2.7 V 3000 F cells x24S, ~%.2f kWh;" % ELEC["supercap_kwh"],
+        "     laser-welded busbars, active cell balancers, IP67 case."],
+    "wheel": [
+        "MFG: forged 7075 rim on PM levitation; 96-pole hybrid HTS+PM",
+        "     rail stator; airless metamaterial tyre (TPU lattice",
+        "     shear-band); 60 000 km service."],
+    "fenders": [
+        "MFG: PP-EPDM injection-moulded, 2.5 mm wall, clip-on service."],
+    "raildrive": [
+        "MFG: Ø1.0 m disc, 96 poles; Bi-2223 HTS windings @ 65 K,",
+        "     40-layer MLI cryostat, N52 PM assist; 350 kN·m continuous."],
+    "engine": [
+        "MFG: rotary ring per engine-card spec -- Inconel 718 HIP,",
+        "     8x 166 cc chambers, C-SiC apex seals, G1.0 balance."],
+    "boiler": [
+        "MFG: 316L finned tube orbital-TIG; dual-chamber expander;",
+        "     relief 26 bar; aerogel+vacuum insulation jacket."],
+    "suspension": [
+        "MFG: tubular linear generator Ø60 mm, 120 mm stroke, N48",
+        "     magnets, 2-phase output to rectifier; billet 6061-T6 body."],
+    "pendulum": [
+        "MFG: Ø500 mm steel rim on roller clutch, 6 kg tungsten insert;",
+        "     harvests pitch/roll; sealed 68 mm bearing, 60k km life."],
+    "lights": [
+        "MFG: LED matrix 3x8 Osram Oslon, 12 W, polycarbonate hardcoat."],
+}
+
+
+def _attach_mfg(parts):
+    """Append the blueprint/manufacturing block to every inspector spec card.
+    Numbered kin parts (ring0, clutch1_2, wheel_f_l, ...) resolve to their base
+    key by stripping digits / taking the first token."""
+    for p in parts:
+        extra = (MFG_SPEC.get(p.key)
+                 or MFG_SPEC.get(p.key.rstrip("0123456789_"))
+                 or MFG_SPEC.get(p.key.split("_")[0]))
+        if extra:
+            p.specs = p.specs + ["--- MANUFACTURING / BLUEPRINT ---"] + extra
+
+
+def _proc_route(part):
+    """Parse the part's spec/MFG text into an OP-numbered process route.
+    Keywords map to canonical shop operations in drawing order."""
+    txt = " ".join(part.specs).lower()
+    seq = (("forged", "FORGE"), ("cast", "CAST"), ("printed", "AM-PRINT"),
+           ("prepreg", "PREPREG"), ("layup", "LAYUP"), ("wound", "WIND"),
+           ("machined", "MACHINE"), ("milled", "MACHINE"), ("gun-drill", "GUN-DRILL"),
+           ("ground", "GRIND"), ("grind", "GRIND"), ("honed", "HONE"),
+           ("carburized", "CARBURIZE"), ("nitrided", "NITRIDE"), ("hip", "HIP"),
+           ("annealed", "ANNEAL"), ("brazed", "BRAZE"), ("tig", "TIG-WELD"),
+           ("welded", "WELD"), ("autoclave", "AUTOCLAVE"), ("cured", "CURE"),
+           ("potted", "POT"), ("anodized", "ANODIZE"), ("dlc", "DLC-COAT"),
+           ("plated", "PLATE"), ("coated", "COAT"), ("film", "FILM"),
+           ("painted", "PAINT"), ("balanced", "BALANCE"),
+           ("torqued", "TORQUE"), ("staked", "STAKE"),
+           ("hipot", "HIPOT"), ("cmm", "CMM-QC"), ("inspected", "INSPECT"))
+    steps = []
+    for kw, op in seq:
+        if kw in txt and op not in steps:
+            steps.append(op)
+    if not steps:
+        steps = ["STOCK", "ASSEMBLE"]
+    if steps[-1] not in ("INSPECT", "CMM-QC", "HIPOT"):
+        steps.append("INSPECT")
+    return steps[:7]
+
+
+def _mesh_cache(m):
+    """One-time per-mesh precomputation: local-space face normals (oriented
+    outward for closed solids so backface culling is valid), face centroids,
+    and a two-sided flag auto-detected by edge sharing -- open shells (panels,
+    films) draw double-sided; closed solids cull backfaces, roughly halving
+    the per-frame face work."""
+    nf = len(m.faces)
+    fn = np.zeros((nf, 3))
+    fc = np.zeros((nf, 3))
+    edges = {}
+    v = m.verts
+    for i, f in enumerate(m.faces):
+        f = list(f)
+        a = v[f[0]]
+        nv = np.cross(v[f[1]] - a, v[f[2]] - a)
+        ln = float(np.linalg.norm(nv))
+        fn[i] = nv / ln if ln > 1e-12 else (0.0, 0.0, -1.0)
+        fc[i] = v[np.asarray(f)].mean(axis=0)
+        for j in range(len(f)):
+            e = (f[j], f[(j + 1) % len(f)])
+            key = e if e[0] < e[1] else (e[1], e[0])
+            edges[key] = edges.get(key, 0) + 1
+    closed = bool(edges) and not any(c < 2 for c in edges.values())
+    if closed:
+        cen = v.mean(axis=0)
+        for i in range(nf):
+            if np.dot(fn[i], fc[i] - cen) < 0.0:
+                fn[i] = -fn[i]             # orient normals outward
+    m.face_n = fn
+    m.face_c = fc
+    m.two_sided = not closed
+    mx = max(len(f) for f in m.faces) if nf else 1
+    pad = np.zeros((nf, mx), dtype=int)
+    for i, f in enumerate(m.faces):
+        pad[i, :] = [f[0]] * (mx - len(f)) + list(f)   # pad = safe for min/max
+    m.face_pad = pad
 
 
 def _grp(meshes, group):
@@ -1084,6 +1310,33 @@ def output_gear_mesh_radius(gear):
     return min(outer - rog * 0.35, inner + rog + 0.005)
 
 
+# --- MULTILAYER RING-CLUTCH transmission (image.png) --------------------------
+# Concentric ring LAYERS; each annular gap between two rings is a wet-clutch
+# layer fed by high-pressure hydraulic fluid. Pressure engages the layers from
+# the CENTRE OUTWARD, so the outermost gap to receive pressure is the "slipped
+# layer" that modulates output. The ratchet shifter can only SLIDE UP; to reach
+# a lower ring it first vents and returns to the inner park rail, then slides
+# up to the target ring and seats the receival pinion BEFORE the gap pressure
+# ramps the new gear's output. Partial pressure = the gear stays locked in
+# place (pinion meshed) while the boundary clutch layer slips -- a high-
+# pressure coupling "disengagement" without moving the shifter.
+TRANS_PARK_POS   = -0.45    # shifter park rail below ring 1 (ratchet reset)
+TRANS_SLIDE_RATE = 2.6      # shifter slide speed, rings/sec
+TRANS_CREEP      = 0.055    # viscous-drag speed fraction of an unpressurized ring
+TRANS_GAP_HALF_M = 0.0036   # half-width of each annular oil gap (~7 mm layer)
+
+
+def output_gear_mesh_radius_f(pos):
+    """CONTINUOUS shifter radius while the receival pinion slides between ring
+    mesh points (and down to the park rail on a ratchet reset)."""
+    edges = trans_ring_edges()
+    rog = DIMS["out_gear_d_mm"] * 0.001 / 2
+    step = (edges[1][0] - edges[0][0]) if len(edges) > 1 else 0.03
+    r = edges[0][0] + rog + 0.005 + pos * step
+    return max(output_gear_mesh_radius(0) + TRANS_PARK_POS * step,
+               min(output_gear_mesh_radius(len(edges) - 1), r))
+
+
 def _integral_clutch(zc, plates=6):
     """The MAIN wet clutch, integral to the piston and sitting in its inner bore.
 
@@ -1303,74 +1556,39 @@ def _second_stage_turbine(zc, r_out):
     return meshes
 
 
-def _wheel_meshes(piv, wr, ww, group="wheel", label_prefix=None):
-    """The ONE detailed, to-scale outer-rotor in-wheel drive, shared by the whole-car
-    wheels AND the engine-preview regen-wheel showcase so they always match. Everything
-    lives INSIDE the tyre radius `wr` (nothing pokes below the road/past the body):
-    tyre, rim rotor shell, bonded magnet band, in-rim disc, 6 spokes, PM bearing hub,
-    and a FIXED EM rail stator with copper windings, the precision air gap and 96-pole
-    markers. `piv`=(x,y,z) hub centre; the wheel spins about local Z brought onto the
-    X (lateral) axis. `label_prefix` (e.g. 'FR') names the callouts, or None for none."""
-    px, py, pz = float(piv[0]), float(piv[1]), float(piv[2])
-    pivn = np.array([px, py, pz])
-    ms = []
-
-    def lname(t):
-        return ("%s %s" % (label_prefix, t)) if label_prefix else ""
-
-    def spin(mesh):
-        return _place_spinner([mesh], pivn, (0.0, math.pi / 2), group)
-
-    def static_ring(v, f, col, name=""):
-        vv = np.asarray(v) @ rot_y(math.pi / 2).T + pivn
-        return Mesh(vv, f, col, name=name, group="static")
-
-    tv, tf = _annulus_cylinder(wr, wr * 0.80, -ww / 2, ww / 2, seg=28)          # tyre
-    ms += spin(Mesh(tv, tf, (20, 20, 24)))
-    rv, rf = _annulus_cylinder(wr * 0.80, wr * 0.70, -ww * 0.42, ww * 0.42, seg=26)  # rim = rotor
-    ms += spin(Mesh(rv, rf, (188, 194, 205), name=lname("rim (rotor shell)")))
-    mv, mf = _annulus_cylinder(wr * 0.70, wr * 0.64, -ww * 0.34, ww * 0.34, seg=28)  # magnet band
-    ms += spin(Mesh(mv, mf, (155, 70, 175), name=lname("bonded rotor magnet band")))
-    dv, df = _annulus_cylinder(wr * 0.60, wr * 0.26, -ww * 0.14, ww * 0.14, seg=28)  # in-rim disc
-    ms += spin(Mesh(dv, df, (140, 148, 164), name=lname("in-rim rotor disc")))
-    for a in range(6):                                                          # spokes
-        an = a * 2 * math.pi / 6
-        sv, sf = _box(wr * 0.44 * math.cos(an), wr * 0.44 * math.sin(an), 0.0,
-                      wr * 0.50, 0.030, ww * 0.34)
-        ms += spin(Mesh(sv, sf, (108, 115, 130)))
-    bv, bf = _annulus_cylinder(wr * 0.24, wr * 0.10, -ww * 0.30, ww * 0.30, seg=20)  # PM hub
-    ms += spin(Mesh(bv, bf, (95, 205, 150), name=lname("PM bearing hub")))
-    gap = max(0.004, RAIL_DRIVE["air_gap_mm"] * 0.001 * 20.0)                   # gap (exaggerated)
-    stat_o = wr * 0.64 - gap
-    gv, gf = _annulus_cylinder(wr * 0.64, stat_o, -ww * 0.32, ww * 0.32, seg=28)     # air gap
-    ms.append(static_ring(gv, gf, (40, 170, 210),
-                          lname("%.2f mm rail air gap" % RAIL_DRIVE["air_gap_mm"])))
-    sv, sf = _annulus_cylinder(stat_o, wr * 0.40, -ww * 0.30, ww * 0.30, seg=28)     # EM stator
-    ms.append(static_ring(sv, sf, (55, 105, 190), lname("stationary EM rail stator")))
-    cv, cf = _annulus_cylinder(stat_o - 0.005, stat_o - 0.026, -ww * 0.24, ww * 0.24, seg=26)
-    ms.append(static_ring(cv, cf, (190, 120, 45), lname("copper rail winding")))    # windings
-    for a in range(24):                                                        # 96-pole markers
-        an = a * 2 * math.pi / 24
-        by = py + (stat_o - 0.014) * math.sin(an)
-        bz = pz + (stat_o - 0.014) * math.cos(an)
-        pv, pf = _box(px, by, bz, ww * 0.48, 0.013, 0.013)
-        ms.append(Mesh(pv, pf, (100, 155, 225), group="static"))
-    return ms
-
-
 def _regen_wheel(zc, r_out):
-    """A road wheel with the rail-ring used as a GENERATOR (engine-preview showcase).
-    On braking / downhill the same EM rail that directly turns the rim is back-driven
-    by wheel motion and pours momentum back into the caps + battery. Uses the SAME
-    detailed, to-scale wheel builder as the whole-car wheels so they always match."""
+    """A road wheel with the rail-ring used as a GENERATOR. On braking / downhill
+    the same electromagnetic rail that directly turns the rim is back-driven by
+    wheel motion and pours momentum back into the caps + battery."""
     mm = 0.001
     wd = DIMS["wheel_d_mm"] * mm / 2
     ww = DIMS["wheel_width_mm"] * mm
-    cx = r_out + 0.85
-    cy = -(r_out + 0.02)
-    meshes = _wheel_meshes((cx, cy, zc), wd, ww, group="wheel", label_prefix=None)
+    wg = DIMS["wheel_gen_d_mm"] * mm / 2
+    cx = r_out + 0.80
+    cy = -(r_out + 0.06)
+    piv = np.array([cx, cy, zc])
+    meshes = []
+    # tire
+    tire = _annulus_cylinder(wd, wd * 0.72, -ww / 2, ww / 2, seg=30)
+    meshes += _place_spinner([Mesh(tire[0], tire[1], (28, 30, 34))],
+                             piv, (0.0, math.pi / 2), "wheel")
+    # rim
+    rim = _annulus_cylinder(wd * 0.72, wd * 0.34, -ww * 0.4, ww * 0.4, seg=24)
+    meshes += _place_spinner([Mesh(rim[0], rim[1], (120, 128, 140))],
+                             piv, (0.0, math.pi / 2), "wheel")
+    # spokes
+    meshes += _place_spinner(_fin_ring(wd * 0.52, 0.0, 6, (92, 98, 110),
+                                       fl=wd * 0.6, fw=0.020, fz=ww * 0.35),
+                             piv, (0.0, math.pi / 2), "wheel")
+    # rail-ring GENERATOR disc (charges on brake / downhill)
+    gen = _solid_cylinder(wg, -ww * 0.3, ww * 0.3, seg=22)
+    meshes += _place_spinner([Mesh(gen[0], gen[1], (70, 95, 150))],
+                             piv, (0.0, math.pi / 2), "wheel")
+    meshes += _place_spinner(_fin_ring(wg * 0.95, 0.0, 16, (58, 78, 128),
+                                       fl=0.03, fw=0.010, fz=ww * 0.3),
+                             piv, (0.0, math.pi / 2), "wheel")
     # regen power cable back toward the battery/caps
-    meshes.append(_pipe((cx, cy + wd * 0.9, zc),
+    meshes.append(_pipe((cx - wd * 0.1, cy + wd * 0.2, zc),
                         (r_out + 0.08, cy + 0.05, zc), 0.010, (90, 200, 255)))
     return meshes
 
@@ -1783,34 +2001,49 @@ def build_engine_parts(n_pistons=1):
          "Same core fuelled torque feeds the transmission drive power"],
         order=nextord(), explode=(0, 0, 0.0), color=C_SHAFT))
 
-    # --- Transmission = concentric RING LAYERS (the rings ARE the clutch) --
-    # Gear 1 is the center ring. Selecting gear N binds rings 1..N together,
-    # while outer rings stay inactive until selected. Each ring has INNER-edge
-    # teeth; the small receival gear shifts radially to that selected ring edge.
+    # --- Transmission = MULTILAYER RING CLUTCH (the rings ARE the clutch) ---
+    # Per image.png: concentric ring layers separated by annular HYDRAULIC GAPS.
+    # High-pressure fluid fills each gap and couples the rings by friction from
+    # the CENTRE OUTWARD -- each gap is a slipped wet-clutch layer. Every ring
+    # is ALSO a gear: it carries teeth on its inner edge, and the small receival
+    # pinion slides UP the shifter rail to the selected ring to take output.
     n = DIMS["trans_rings"]
     edges = trans_ring_edges()
     ro = edges[-1][1]
     ri = edges[0][0]
     tth = DIMS["trans_thick_mm"] * mm
     zt = -th / 2 - tth / 2 - 0.02
+    gw = TRANS_GAP_HALF_M
     tmeshes = []
     for k, (inner, outer) in enumerate(edges):
         col = C_TRANS if k % 2 == 0 else C_TRANS_ALT
-        v, f = _annulus_cylinder(outer * 0.985, inner, zt - tth / 2, zt + tth / 2, seg=48)
+        # the ring itself, slimmed so the oil gap on each side is visible
+        v, f = _annulus_cylinder(outer - gw, inner + gw,
+                                 zt - tth / 2, zt + tth / 2, seg=48)
         tmeshes.append(Mesh(v, f, col, group="trans%d" % k))       # each ring its rate
+        # the annular HYDRAULIC GAP layer on this ring's inner edge: a thin wet
+        # film of pressurized fluid that couples this ring to its inner
+        # neighbour (or, for ring 1, straight to the core). It shears between
+        # the two faces, so it spins at their midpoint -- the slip is visible.
+        v, f = _annulus_cylinder(inner + gw, inner - gw,
+                                 zt - tth * 0.42, zt + tth * 0.42, seg=48)
+        tmeshes.append(Mesh(v, f, C_GAPFILL, group="transgap%d" % k))
         tooth_count = 14 + k * 4
-        teeth = _gear_teeth(inner + 0.006, zt, tooth_count, tth / 2,
+        teeth = _gear_teeth(inner + gw + 0.006, zt, tooth_count, tth / 2,
                             (185, 150, 55), (0, 0, 0), (0, 0))
         tmeshes += _grp(teeth, "trans%d" % k)
-    parts.append(Part("trans", "Transmission Gear Wet-Clutch Ring-Layers (+ output teeth)", tmeshes,
-        ["Function: a GEAR WET CLUTCH -- %d concentric RING LAYERS, and each ring" % n,
-         "IS its own gear ratio (gear 1 = centre ring, gear %d = outer ring)." % n,
-         "The rings BIND together like a multi-plate wet clutch: the TRANSMISSION",
-         "BIND slider is that wet-clutch pressure. FULL bind = the selected gear",
-         "locks solid; LESS bind = more SLIP (e.g. gear 2 slips more the lower the",
-         "bind). A separate SET-GEAR shifter (Gear slider) chooses which ring is",
-         "engaged; every ring carries TEETH on its INNER edge and the receival",
-         "gear shifts to the selected ring edge. Rings, not discs."],
+    parts.append(Part("trans", "Multilayer Ring-Clutch Transmission (+ ring teeth)", tmeshes,
+        ["Function: a MULTILAYER RING CLUTCH -- %d concentric RING LAYERS, each" % n,
+         "ring IS a gear and each annular gap between rings is a wet-clutch",
+         "layer. High-pressure hydraulic fluid fills the gaps and couples the",
+         "rings by friction from the CENTRE OUTWARD, so the outermost gap to",
+         "receive pressure is the SLIPPED layer that modulates output (the RING",
+         "PRESSURE slider). FULL pressure = the selected gear locks solid; LESS",
+         "= the boundary gap SLIPS while the gear stays locked in place -- a",
+         "high-pressure-coupling disengagement without moving the shifter.",
+         "The ratchet shifter slides UP only (downshift = vent, park, slide up)",
+         "and seats the receival pinion at the ring BEFORE pressure ramps",
+         "output. Rings, not discs."],
         order=nextord(), explode=(0, 0, -0.42), color=C_TRANS))
 
     # --- Axial-flux generator (driven by output gear -> CHARGES) -------
@@ -2006,7 +2239,7 @@ def build_engine_parts(n_pistons=1):
              AMBIENT_HARVEST_W["triboelectric"], AMBIENT_HARVEST_W["tire"]),
          "~%.0f W EXTERNAL solar charges even coasting engine-OFF; in bright sun below" % (
              (AMBIENT_HARVEST_W["solar"] + AMBIENT_HARVEST_W["solar_roof"]) * SUN),
-         "~50 mph it can cover the road load (solar-sustained). Core MPG lever."],
+         "~10-25 mph it can cover the road load (solar-sustained). Core MPG lever."],
         order=nextord(), explode=(0.0, 1.4, 0.0), color=(70, 120, 190)))
 
     # --- Dedicated PV solar ROOF panel (extra electric) ----------------
@@ -2083,7 +2316,7 @@ def build_engine_parts(n_pistons=1):
         order=nextord(), explode=(0.0, 0.4, -1.5), color=(150, 205, 235)))
 
     # --- Through-body straight flow-through duct (rear-wake drag kill) --
-    parts.append(Part("flowduct", "Through-Body Flow Duct (fills the base-wake vacuum)",
+    parts.append(Part("flowduct", "Through-Body Flow Duct (kills rear-wake drag)",
         _flow_through_duct(0.0, r_out),
         ["Function: a wide, thin, STRAIGHT hollow duct from a low front-GRILL intake,",
          "straight through the body, to a rear DIFFUSER. High-pressure nose air flows",
@@ -2142,6 +2375,7 @@ def build_engine_parts(n_pistons=1):
          "(not powered electromagnetic) bearings, diamagnetically stabilized (info 8c)"],
         order=nextord(), explode=(0, 0, 0.42 + n_pistons * 0.42 + 0.12), color=C_FLYWHEEL))
 
+    _attach_mfg(parts)
     return parts
 
 
@@ -2237,13 +2471,73 @@ def build_car_parts():
 
     # --- 4 road wheels: EM RAIL-RING direct drive (rim IS the rotor) ------
     def wheel(px, pz, axle, side):
-        # detailed, to-scale outer-rotor in-wheel drive (shared builder); only the
-        # front-right wheel carries the per-part callouts so the labels stay readable.
+        ms = []
+        piv = (px, wr, pz)
         short = ("%s%s" % ("F" if axle == "front" else "R",
                            "R" if side == "right" else "L"))
         detail = (axle == "front" and side == "right")
-        return _wheel_meshes((px, wr, pz), wr, ww, group="wheel",
-                             label_prefix=short if detail else None)
+
+        def lname(text):
+            return ("%s %s" % (short, text)) if detail else ""
+
+        def static_ring(v, f, col, name=""):
+            vv = np.asarray(v) @ rot_y(math.pi / 2).T + np.array(piv)
+            return Mesh(vv, f, col, name=name, group="static")
+
+        # OUTER-ROTOR IN-WHEEL DRIVE (to scale): everything lives INSIDE the tyre
+        # radius, so nothing pokes below the road or past the body. The rim IS the
+        # rotor; a fixed EM rail stator sits within it across the precision air gap.
+        # TYRE: low-profile tread + sidewall. Outer radius = wr (touches the road).
+        tv, tf = _annulus_cylinder(wr, wr * 0.80, -ww / 2, ww / 2, seg=28)
+        ms += _place_spinner([Mesh(tv, tf, (20, 20, 24))],
+                             piv, (0.0, math.pi / 2), "wheel")
+
+        # Structural RIM = rotor shell (spins with the wheel).
+        rv, rf = _annulus_cylinder(wr * 0.80, wr * 0.70, -ww * 0.42, ww * 0.42, seg=26)
+        ms += _place_spinner([Mesh(rv, rf, (188, 194, 205),
+                                   name=lname("rim (rotor shell)"))],
+                             piv, (0.0, math.pi / 2), "wheel")
+        # Bonded rotor MAGNET BAND on the rim inner face (spins WITH the wheel).
+        mv, mf = _annulus_cylinder(wr * 0.70, wr * 0.64, -ww * 0.34, ww * 0.34, seg=28)
+        ms += _place_spinner([Mesh(mv, mf, (155, 70, 175),
+                                   name=lname("bonded rotor magnet band"))],
+                             piv, (0.0, math.pi / 2), "wheel")
+        # Visible in-rim rotor / flywheel disc between rim and hub.
+        dv, df = _annulus_cylinder(wr * 0.60, wr * 0.26, -ww * 0.14, ww * 0.14, seg=28)
+        ms += _place_spinner([Mesh(dv, df, (140, 148, 164),
+                                   name=lname("in-rim rotor disc"))],
+                             piv, (0.0, math.pi / 2), "wheel")
+        for a in range(6):                                   # stiff visible spokes
+            an = a * 2 * math.pi / 6
+            sv, sf = _box(wr * 0.44 * math.cos(an), wr * 0.44 * math.sin(an), 0.0,
+                          wr * 0.50, 0.030, ww * 0.34)
+            ms += _place_spinner([Mesh(sv, sf, (108, 115, 130))],
+                                 piv, (0.0, math.pi / 2), "wheel")
+
+        # Passive permanent-magnet BEARING HUB (center).
+        bv, bf = _annulus_cylinder(wr * 0.24, wr * 0.10, -ww * 0.30, ww * 0.30, seg=20)
+        ms += _place_spinner([Mesh(bv, bf, (95, 205, 150),
+                                   name=lname("PM bearing hub"))],
+                             piv, (0.0, math.pi / 2), "wheel")
+
+        # STATIONARY EM RAIL STATOR: fixed ring INSIDE the rotor magnet band across
+        # the precision air gap. It does NOT spin; rail current turns the rim rotor.
+        gap = max(0.004, RAIL_DRIVE["air_gap_mm"] * 0.001 * 20.0)   # gap exaggerated to read
+        stat_o = wr * 0.64 - gap
+        gv, gf = _annulus_cylinder(wr * 0.64, stat_o, -ww * 0.32, ww * 0.32, seg=28)
+        ms.append(static_ring(gv, gf, (40, 170, 210), lname("%.2f mm rail air gap" %
+                                                            RAIL_DRIVE["air_gap_mm"])))
+        sv, sf = _annulus_cylinder(stat_o, wr * 0.40, -ww * 0.30, ww * 0.30, seg=28)
+        ms.append(static_ring(sv, sf, (55, 105, 190), lname("stationary EM rail stator")))
+        cv, cf = _annulus_cylinder(stat_o - 0.005, stat_o - 0.026, -ww * 0.24, ww * 0.24, seg=26)
+        ms.append(static_ring(cv, cf, (190, 120, 45), lname("copper rail winding")))
+        for a in range(24):                                  # visible markers for 96 poles
+            an = a * 2 * math.pi / 24
+            by = wr + (stat_o - 0.014) * math.sin(an)
+            bz = pz + (stat_o - 0.014) * math.cos(an)
+            pv, pf = _box(px, by, bz, ww * 0.48, 0.013, 0.013)
+            ms.append(Mesh(pv, pf, (100, 155, 225), group="static"))
+        return ms
 
     wheel_defs = [
         (tx, axf, "front", "right"),
@@ -2380,103 +2674,30 @@ def build_car_parts():
          "HEAT into the steam loop -- more power on hot sunny days (info 6g)."],
         order=nextord(), explode=(0.0, 1.4, 1.6), color=(255, 210, 90)))
 
-    # --- Through-body FLOW DUCT (RAISED to fill the base-wake centre) -----
-    # The intake sits low at the nose, but the bore rises through the body so its exit
-    # meets the base-wake CENTROID (mid-height) at the tail, where the vacuum is
-    # strongest -- filling it more directly than a floor-level exit for a bigger
-    # pressure-drag cut. dh = half-height, yb = mid-bore height, yr = raised exit height.
-    dw, dh, wall = 0.32, 0.09, 0.012
-    yb = gc + 0.14                                          # bore raised off the floor
-    yr = gc + 0.34                                          # exit lifted to the wake centre
+    # --- Through-body straight FLOW DUCT ---------------------------------
+    yb, dw, dh, wall = gc + 0.03, 0.32, 0.09, 0.012
     zf, zr = 1.60, -1.60
-
-    def _duct_y(z):                                         # bore floor rises from front->rear
-        t = clamp((zf - z) / (zf - zr))
-        return yb + (yr - yb) * t
     duct = []
-    seg = 8
-    for k in range(seg):                                   # rising top + bottom walls
-        z0 = zf - (zf - zr) * k / seg
-        z1 = zf - (zf - zr) * (k + 1) / seg
-        ymid = _duct_y((z0 + z1) / 2)
-        for sy in (dh, -dh):
-            v, f = _box(0.0, ymid + sy, (z0 + z1) / 2, dw * 2, wall, (z0 - z1))
-            duct.append(static(v, f, (80, 92, 118)))
-        for sx in (dw, -dw):                              # side walls
-            v, f = _box(sx, ymid, (z0 + z1) / 2, wall, dh * 2, (z0 - z1))
-            duct.append(static(v, f, (80, 92, 118)))
-    for i in range(6):                                       # low front grill slats
+    for sy in (dh, -dh):
+        v, f = _box(0.0, yb + sy, 0.0, dw * 2, wall, (zf - zr))
+        duct.append(static(v, f, (80, 92, 118)))
+    for sx in (dw, -dw):
+        v, f = _box(sx, yb, 0.0, wall, dh * 2, (zf - zr))
+        duct.append(static(v, f, (80, 92, 118)))
+    for i in range(6):                                       # front grill slats
         x = -dw + (i + 0.5) * (2 * dw) / 6.0
         v, f = _box(x, yb, zf, 0.014, dh * 1.7, 0.03)
         duct.append(static(v, f, (120, 132, 155)))
-    for i in range(6):                                       # raised rear diffuser vanes
-        x = -dw + (i + 0.5) * (2 * dw) / 6.0
-        v, f = _box(x, yr, zr, 0.014, dh * 1.9, 0.03)
-        duct.append(static(v, f, (120, 132, 155)))
     for (dx, dy) in [(-dw * 0.5, 0), (0, 0), (dw * 0.5, 0), (0, dh * 0.5), (0, -dh * 0.5)]:
-        # bright straight-through flow lines that RISE to the wake centre at the tail
-        duct.append(_pipe((dx, yb + dy, zf + 0.05), (dx, yr + dy, zr - 0.2), 0.004, (150, 210, 255)))
-    parts.append(Part("flowduct", "Through-Body Flow Duct (fills the base-wake vacuum)", duct,
-        ["Function: the wide, thin hollow duct takes high-pressure nose air straight",
-         "through the car; its exit is RAISED to the base-wake centroid (mid-height) at",
-         "the tail so the through-flow fills the low-pressure vacuum where it is",
-         "strongest -- killing pressure drag (dominant at speed, info 8d).",
+        duct.append(_pipe((dx, yb + dy, zf + 0.05), (dx, yb + dy, zr - 0.2), 0.004, (150, 210, 255)))
+    parts.append(Part("flowduct", "Through-Body Flow Duct (kills rear-wake drag)", duct,
+        ["Function: the wide, thin, STRAIGHT hollow duct from the front grill straight",
+         "through the car to a rear diffuser -- nose air flows through and FILLS the",
+         "rear wake, killing pressure drag (dominant at speed, info 8d).",
          "Cuts the effective Cd ~%.0f-%.0f%% (stronger at speed). Parked, it doubles" % (
              DUCT["base"] * DUCT["blend"] * 100, (DUCT["base"] + DUCT["speed"]) * DUCT["blend"] * 100),
          "as passive cabin/battery ventilation."],
         order=nextord(), explode=(0.0, -1.9, 0.0), color=(100, 120, 150)))
-
-    # --- Drag-air capture: micro-groove riblets + rear bladeless turbines ---
-    # The little airflow that GRIPS the body (does not slip off the hydrophobic skin)
-    # is caught by directional shark-skin RIBLETS aligned with the airflow, funnelled
-    # aft along the body and fed into small bladeless (Tesla-type) turbines at the
-    # tail diffuser -- turning a slice of committed drag into electricity (info 8/6e).
-    def _body_top_hw(z):
-        """Interpolate the smoothed body cross-section (halfwidth, y_top) at length z."""
-        secs = body_sections
-        if z <= secs[0][0]:
-            a = b = secs[0]
-        elif z >= secs[-1][0]:
-            a = b = secs[-1]
-        else:
-            a = b = secs[0]
-            for k in range(len(secs) - 1):
-                if secs[k][0] <= z <= secs[k + 1][0]:
-                    a, b = secs[k], secs[k + 1]
-                    break
-        t = 0.0 if b[0] == a[0] else (z - a[0]) / (b[0] - a[0])
-        return a[1] + (b[1] - a[1]) * t, a[3] + (b[3] - a[3]) * t   # halfwidth, y_top
-    grooves = []
-    z0r, z1r, nz = -1.78, 0.55, 13
-    seg_len = (z1r - z0r) / (nz - 1)
-    for lane in range(-3, 4):                          # 7 fore-aft riblet lanes on the deck
-        for i in range(nz):
-            z = z0r + seg_len * i
-            hw, y1 = _body_top_hw(z)
-            x = lane / 3.4 * hw * 0.86
-            v, f = _box(x, y1 + 0.010, z, 0.008, 0.014, seg_len * 1.05)   # ridge proud of shell
-            grooves.append(static(v, f, (120, 150, 188)))
-    for s in (1, -1):                                  # 2 rear bladeless recovery turbines
-        base = (s * 0.20, 0.32, -1.82)                 # at the rear diffuser, exposed aft
-        dv, dfc = _solid_cylinder(0.050, -0.05, 0.05, seg=14)   # bladeless turbine drum
-        grooves += _place_spinner([Mesh(dv, dfc, (150, 200, 235))], base, (0.0, math.pi / 2), "dragturb")
-        for k in range(3):                             # concentric bladeless discs (spin)
-            rr = 0.050 * (0.55 + 0.15 * k)
-            rv, rf = _annulus_cylinder(rr, rr - 0.005, -0.052, 0.052, seg=12)
-            grooves += _place_spinner([Mesh(rv, rf, (90, 150, 210))], base, (0.0, math.pi / 2), "dragturb")
-        grooves.append(_pipe(base, (s * 0.10, 0.28, -1.35), 0.006, (90, 200, 255)))   # cable to pack
-    parts.append(Part("draggrooves", "Drag-Air Capture Grooves + Micro-Turbines", grooves,
-        ["Function: directional shark-skin RIBLETS (aligned with the airflow) on the",
-         "rear body that catch the boundary-layer air the hydrophobic skin did NOT slip",
-         "off, and funnel it aft into two small BLADELESS (Tesla-type) recovery turbines",
-         "at the tail. Fully passive -- it turns a slice of already-committed drag into",
-         "electricity (recover-only: ~%.0f%% of the remaining aero drag, groove %.0f%% x" % (
-             DRAG_CAPTURE["groove_eff"] * DRAG_CAPTURE["turbine_eff"] * 100,
-             DRAG_CAPTURE["groove_eff"] * 100),
-         "turbine %.0f%%), scaling with speed (aero ~v^3). It recovers drag energy the" % (
-             DRAG_CAPTURE["turbine_eff"] * 100),
-         "car already paid, never free -- the skin cuts drag FIRST, this catches the rest."],
-        order=nextord(), explode=(0.0, 1.6, -0.3), color=(120, 150, 188)))
 
     # --- Parked windmill / deployable tail fin ---------------------------
     wbase = np.array([0.0, 0.48, -1.72])
@@ -2583,6 +2804,7 @@ def build_car_parts():
          "bar brightens on braking and the reverse lights on reverse (see DRIVE)."],
         order=nextord(), explode=(0.0, 1.0, 1.6), color=(245, 240, 205)))
 
+    _attach_mfg(parts)
     return parts
 
 
@@ -2598,6 +2820,9 @@ class EngineRenderer:
         self.n_pistons = 1
         self.parts = (self.parts_builder(self.n_pistons) if supports_pistons
                       else self.parts_builder())
+        for _p in self.parts:                    # prewarm face/normal caches so
+            for _m in _p.meshes:                 # the first drawn frame has no
+                _mesh_cache(_m)                  # geometry-compilation hitch
         self._home = (home_az, home_el, home_dist)
         self.az = home_az
         self.el = home_el
@@ -2605,6 +2830,7 @@ class EngineRenderer:
         self.pan = np.array([0.0, 0.0])
         self.light = np.array([0.4, 0.6, 1.0])
         self.light = self.light / np.linalg.norm(self.light)
+        self.aa = True                      # anti-aliased faces (auto-off if slow)
         self.view = "full"                  # full | exploded | assembly
         self.section = False                # cross-section CUT toggle (any view)
         self.pedal_extend = 0.0             # pop-out pedal deploy 0..1 (else retracted)
@@ -2614,6 +2840,10 @@ class EngineRenderer:
         self.selected = None
         self.pop = np.zeros(len(self.parts))
         self.hover_spread = 0.0
+        self._shadow_cache = {}             # (w,h) -> soft ground-shadow sprite
+        self._work = None                   # screen-size SRCALPHA face buffer
+        self._fade_cache = {}               # (w,h) -> reflection falloff strip
+        self._vin_cache = {}                # (w,h) -> viewport vignette overlay
 
     def set_pistons(self, n):
         if not self.supports_pistons:
@@ -2713,10 +2943,70 @@ class EngineRenderer:
             return part.explode * 1.0, 0.30, "pending"
         return part.explode * eamt, 1.0, "normal"
 
+    def _work_surf(self, surf):
+        """Screen-size transparent buffer faces rasterise into on the fancy
+        path (kept separate so the model can be mirrored for the floor
+        reflection and vignetted without touching the background)."""
+        sz = surf.get_size()
+        if self._work is None or self._work.get_size() != sz:
+            self._work = pygame.Surface(sz, pygame.SRCALPHA)
+        return self._work
+
+    def _fade_grad(self, w, h):
+        """Vertical alpha falloff strip applied to the mirrored faces."""
+        key = (w, h)
+        spr = self._fade_cache.get(key)
+        if spr is None:
+            if len(self._fade_cache) > 16:
+                self._fade_cache.clear()
+            spr = pygame.Surface((w, h), pygame.SRCALPHA)
+            for y in range(h):
+                a = int(84 * (1.0 - y / h) ** 1.35)
+                pygame.draw.line(spr, (255, 255, 255, a), (0, y), (w, y))
+            self._fade_cache[key] = spr
+        return spr
+
+    def _vignette(self, w, h):
+        """Cached soft corner darkening for the model viewport."""
+        key = (w, h)
+        spr = self._vin_cache.get(key)
+        if spr is None:
+            if len(self._vin_cache) > 8:
+                self._vin_cache.clear()
+            spr = pygame.Surface((w, h), pygame.SRCALPHA)
+            depth = int(min(w, h) * 0.16)
+            for i in range(depth):
+                a = int(60 * (1.0 - i / depth) ** 1.7)
+                if a <= 0:
+                    break
+                pygame.draw.rect(spr, (8, 10, 14, a),
+                                 (i, i, w - 2 * i, h - 2 * i), 1)
+            self._vin_cache[key] = spr
+        return spr
+
+    def _shadow_sprite(self, w, h):
+        """Cached soft radial-gradient ellipse used as a studio floor shadow."""
+        key = (w, h)
+        spr = self._shadow_cache.get(key)
+        if spr is None:
+            if len(self._shadow_cache) > 24:
+                self._shadow_cache.clear()
+            spr = pygame.Surface((w, h), pygame.SRCALPHA)
+            for i in range(10, 0, -1):
+                t = i / 10.0
+                a = int(96 * (1.0 - t) ** 1.5)
+                ew, eh = int(w * t), int(h * t)
+                if ew > 0 and eh > 0:
+                    pygame.draw.ellipse(spr, (12, 15, 20, a),
+                                        ((w - ew) // 2, (h - eh) // 2, ew, eh))
+            self._shadow_cache[key] = spr
+        return spr
+
     def render(self, surf, rect, angles, firing_glow, mouse_pos=None,
                show_labels=True, label_font=None, interactive=False,
                view_override=None, injection=None, heat=0.0,
-               selector_radius=None, brake_glow=0.0, reverse_glow=0.0):
+               selector_radius=None, brake_glow=0.0, reverse_glow=0.0,
+               fog_col=None):
         clip = surf.get_clip()
         surf.set_clip(rect)
         cx = rect.x + rect.w / 2.0 + self.pan[0]
@@ -2733,11 +3023,7 @@ class EngineRenderer:
         # crisp facet outlines in the main preview at <=2 pistons; off for the
         # small drive inset and heavy 3-4 piston configs (keeps it fast)
         section = (self.section and view_override is None and vw in ("full", "exploded"))
-        # per-facet outlines suit the mechanical ENGINE (they read the machined edges),
-        # but on the smooth whole-CAR body they look like unwanted panel seams -- so
-        # outline only the engine (supports_pistons), not the car renderer.
-        do_outline = (view_override is None) and self.supports_pistons \
-            and (self.n_pistons <= 3 or section)
+        do_outline = (view_override is None) and (self.n_pistons <= 3 or section)
         hi = (self.selected if self.selected is not None else self.hovered)
         if view_override is not None:
             hi = None
@@ -2748,25 +3034,35 @@ class EngineRenderer:
         screeninfo = []
         fire_points = []            # fixed ignition areas (one per rotary piston)
         lx, ly, lz = float(self.light[0]), float(self.light[1]), float(self.light[2])
+        gx0, gx1, gy1 = 1e18, -1e18, -1e18   # footprint bbox (shadow/reflection)
 
         for pi, part in enumerate(self.parts):
             base_off, dim, tag = self._layout(pi, vw, eamt)
             pop = self.pop[pi] if view_override is None else 0.0
             off = base_off + part.popdir * (pop * 0.16)
-            if part.key == "pedals" and self.supports_pistons:
-                # ENGINE preview only: retract the pop-out pedals into the frame (-X)
-                # when not deployed. The car's cabin pedals stay put (hidden inside the
-                # body in FULL; they still pop out via the explode offset).
+            if part.key == "pedals":
+                # retract the pop-out pedals into the frame (-X) when not deployed
                 off = off + np.array([-1.25 * (1.0 - self.pedal_extend), 0.0, 0.0])
             highlight = (pi == hi)
             allcam = []
+            selr = -1.0 if selector_radius is None else selector_radius
             for m in part.meshes:
-                wv = m.world_verts(angles.get(m.group, default_ang),
-                                   selector_radius=selector_radius) + off
-                cam = wv @ Rcam.T
-                cam[:, 2] += self.dist
+                ang = angles.get(m.group, default_ang) if m.spin else 0.0
+                # memoise the whole vertex transform: on frames where camera,
+                # explode offsets and this mesh's spin angle are unchanged,
+                # wv+cam are reused with zero numpy work. Non-spinning meshes
+                # (spin==0) ignore `ang` entirely -> they cache across frames.
+                ckey = (ang, off[0], off[1], off[2], self.az, self.el,
+                        self.dist, float(self.pan[0]), float(self.pan[1]),
+                        selr, rect.w, rect.h)
+                if getattr(m, "_ck", None) != ckey:
+                    wv = m.world_verts(ang, selector_radius=selector_radius) + off
+                    cam = wv @ Rcam.T
+                    cam[:, 2] += self.dist
+                    m._wv, m._camc, m._ck = wv, cam, ckey
+                else:
+                    wv, cam = m._wv, m._camc
                 allcam.append(cam)
-                caml = cam.tolist()
                 col = m.color
                 if m.chamber_index is not None:
                     g = firing_glow[m.chamber_index]
@@ -2791,16 +3087,6 @@ class EngineRenderer:
                     outline, ow = (12, 14, 18), 1
                 else:
                     outline, ow = None, 0        # no per-face stroke -> faster
-                # project all verts to screen (pure-python is faster per-face)
-                sxl, syl, dzl = [], [], []
-                for vx2, vy2, vz2 in caml:
-                    dzl.append(vz2)
-                    if vz2 > 0.05:
-                        sxl.append(cx + focal * vx2 / vz2)
-                        syl.append(cy - focal * vy2 / vz2)
-                    else:
-                        sxl.append(0.0)
-                        syl.append(0.0)
                 # per-mesh DETAIL callouts clutter the assembled FULL view, so show
                 # them only when the part is spread out (exploded/assembly) or hovered
                 if (show_labels and label_font and m.name and tag != "pending"
@@ -2810,38 +3096,108 @@ class EngineRenderer:
                         mlx = cx + focal * mcen[0] / mcen[2]
                         mly = cy - focal * mcen[1] / mcen[2]
                         labels.append((mcen[2], (mlx, mly), m.name, "detail"))
-                for face in m.faces:
-                    if section and self._section_cut(part.key, wv, face):
-                        continue
-                    clipped = False
-                    for i in face:
-                        if dzl[i] <= 0.05:
-                            clipped = True
-                            break
-                    if clipped:
-                        continue
-                    ax, ay, az = caml[face[0]]
-                    bx, by, bz = caml[face[1]]
-                    fx, fy, fz = caml[face[2]]
-                    ux, uy, uz = bx - ax, by - ay, bz - az
-                    wx, wy, wz = fx - ax, fy - ay, fz - az
-                    nx = uy * wz - uz * wy
-                    ny = uz * wx - ux * wz
-                    nz = ux * wy - uy * wx
-                    inv = 1.0 / ((nx * nx + ny * ny + nz * nz) ** 0.5 or 1.0)
-                    nx *= inv
-                    ny *= inv
-                    nz *= inv
-                    if nz > 0:
-                        nx, ny, nz = -nx, -ny, -nz
-                    d = nx * lx + ny * ly + nz * lz
-                    shade = 0.35 + 0.65 * (d if d > 0.0 else 0.0)
-                    fc = (int(cr * shade), int(cg * shade), int(cb * shade))
-                    ds = 0.0
-                    for i in face:
-                        ds += dzl[i]
-                    polys.append((ds / len(face), [(sxl[i], syl[i]) for i in face],
-                                  fc, outline, ow))
+                # PER-MESH SHADING CACHE: if the transform (ckey), final colour,
+                # outline style, fog and section state are all unchanged since
+                # last frame, the mesh contributes the exact same polygon list
+                # -- reuse it verbatim instead of re-running the whole vector
+                # pipeline. Spinning meshes still miss every frame (their angle
+                # is inside ckey); static camera + static meshes hit ~always.
+                skey = (ckey, col, outline, ow, fog_col, section,
+                        rect.x, rect.y)
+                if getattr(m, "_pk", None) == skey:
+                    polys.extend(m._pp)
+                    bbm = m._bb
+                    if view_override is None and bbm is not None:
+                        gx0 = min(gx0, bbm[0])
+                        gx1 = max(gx1, bbm[1])
+                        gy1 = max(gy1, bbm[2])
+                    continue
+                # vectorised projection (was a per-vertex python loop)
+                zi = cam[:, 2]
+                zs = np.where(zi > 0.05, zi, 1.0)
+                sxa = cx + focal * cam[:, 0] / zs
+                sya = cy - focal * cam[:, 1] / zs
+                sxa[zi <= 0.05] = 0.0
+                sya[zi <= 0.05] = 0.0
+                # cached face normals/centroids (built once by _mesh_cache).
+                # Vectorised per-face tests: near-plane clip, screen bounds,
+                # sub-pixel size and BACKFACE CULLING all happen in numpy --
+                # python only ever touches the faces that actually draw.
+                if not hasattr(m, "face_n"):
+                    _mesh_cache(m)
+                nrm = m.face_n @ Rcam.T
+                dsz = ((m.face_c + off) @ Rcam.T)[:, 2] + self.dist
+                pad = m.face_pad
+                px = sxa[pad]                        # (nf, maxv) screen x once
+                py = sya[pad]
+                zmin = zi[pad].min(axis=1)
+                xmin = px.min(axis=1)
+                xmax = px.max(axis=1)
+                ymin = py.min(axis=1)
+                ymax = py.max(axis=1)
+                keep = (zmin > 0.05) & (xmax >= rect.x) & (xmin <= rect.right) \
+                    & (ymax >= rect.y) & (ymin <= rect.bottom) \
+                    & ((xmax - xmin) * (ymax - ymin) >= 3.0)
+                nzf_arr = nrm[:, 2]
+                if not m.two_sided:
+                    keep &= nzf_arr <= 0.0
+                idx = np.nonzero(keep)[0]
+                chunk = []
+                bbm = None
+                if idx.size:
+                    if view_override is None:
+                        bbm = (float(xmin[idx].min()),
+                               float(xmax[idx].max()),
+                               float(ymax[idx].max()))
+                        gx0 = min(gx0, bbm[0])
+                        gx1 = max(gx1, bbm[1])
+                        gy1 = max(gy1, bbm[2])
+                    # STUDIO SHADING (vectorised over surviving faces):
+                    # warm key + cool fill + rim term + Blinn sheen.
+                    nsub = nrm[idx].copy()
+                    flip = nzf_arr[idx] > 0.0
+                    nsub[flip] = -nsub[flip]      # open shells flip to face cam
+                    d = (nsub @ np.array([lx, ly, lz])).clip(0.0, None)
+                    f2 = (nsub @ np.array(FILL_L)).clip(0.0, None)
+                    rim = 1.0 - np.abs(nsub[:, 2])
+                    shade = 0.30 + 0.60 * d + 0.13 * f2 + 0.10 * rim
+                    hs = (nsub @ np.array(HALF_L)).clip(0.0, None)
+                    spec = hs * hs * hs * hs * hs * 52.0
+                    # matte/dark surfaces (tyres, shadows) take less sheen
+                    spec *= 0.30 + 0.70 * (0.30 * cr + 0.55 * cg
+                                           + 0.15 * cb) / 255.0
+                    fc_r = cr * shade + spec
+                    fc_g = cg * shade + spec
+                    fc_b = cb * shade + spec * 1.12
+                    dsz_s = dsz[idx]
+                    if fog_col is not None:
+                        # DEPTH FOG applied here (vectorised), not per-poly
+                        tf = np.clip((dsz_s - (self.dist + 0.35)) * 0.14,
+                                     0.0, 0.22)
+                        fc_r += (fog_col[0] - fc_r) * tf
+                        fc_g += (fog_col[1] - fc_g) * tf
+                        fc_b += (fog_col[2] - fc_b) * tf
+                    fcs = list(zip(
+                        np.clip(fc_r, 0, 255).astype(int).tolist(),
+                        np.clip(fc_g, 0, 255).astype(int).tolist(),
+                        np.clip(fc_b, 0, 255).astype(int).tolist()))
+                    # ALL surviving face point-lists in ONE shot: padded faces
+                    # just repeat their first vertex -> rasterisers ignore it.
+                    pts_all = np.empty((idx.size, pad.shape[1], 2))
+                    pts_all[:, :, 0] = px[idx]
+                    pts_all[:, :, 1] = py[idx]
+                    pts_l = pts_all.tolist()
+                    xmn, xmx = xmin.tolist(), xmax.tolist()
+                    ymn, ymx = ymin.tolist(), ymax.tolist()
+                    dsz_l = dsz_s.tolist()
+                    for j, fi in enumerate(idx.tolist()):
+                        if section and self._section_cut(part.key, wv,
+                                                         m.faces[fi]):
+                            continue
+                        chunk.append((dsz_l[j], pts_l[j], fcs[j], outline, ow,
+                                      (xmn[fi], xmx[fi], ymn[fi], ymx[fi])))
+                m._pk, m._pp, m._bb = skey, chunk, bbm
+                polys.extend(chunk)
 
             if not allcam:
                 continue
@@ -2875,15 +3231,83 @@ class EngineRenderer:
                         hy = cy - focal * hc[1] / hc[2]
                         leaders.append(((pcx, pcy), (hx, hy)))
 
+        self._last_screeninfo = screeninfo   # part screen anchors (blueprint Ø)
         polys.sort(key=lambda t: t[0], reverse=True)
-        for _, pts, fc, outline, ow in polys:
-            if len(pts) >= 3:
+        # Footprint + floor-line estimate (gx0/gx1/gy1) was accumulated during
+        # the mesh loop above.
+        # FANCY path: faces rasterise into a transparent work surface so they
+        # can be mirrored below the floor line; edges also pick up a subtle
+        # darker aaline that reads as panel-gap shading.
+        fancy = self.aa and view_override is None and fog_col is not None
+        work = self._work_surf(surf) if fancy else None
+        if work is not None:
+            work.fill((0, 0, 0, 0))
+        tgt = work if work is not None else surf
+        # DEPTH FOG is applied in the vectorised shading block above.
+        do_aa = self.aa and view_override is None
+        draw_poly = pygame.draw.polygon
+        if do_aa:
+            aa_poly = pygame.gfxdraw.aapolygon
+            aa_lines = pygame.draw.aalines
+            for dsz, pts, fc, outline, ow, bb in polys:
                 try:
-                    pygame.draw.polygon(surf, fc, pts)
+                    area = (bb[1] - bb[0]) * (bb[3] - bb[2])
+                    # LOD: sub-pixel faces get the fill only -- aa edges and
+                    # panel-gap tint are invisible below ~48 px2.
+                    if area < 60.0:
+                        draw_poly(tgt, fc, pts)
+                        continue
+                    draw_poly(tgt, fc, pts)
+                    aa_poly(tgt, pts, fc)
                     if outline is not None:
-                        pygame.draw.polygon(surf, outline, pts, ow)
+                        if area >= 140.0:
+                            if ow > 1:
+                                draw_poly(tgt, outline, pts, ow)
+                            aa_lines(tgt, outline, True, pts)
+                    elif work is not None and area >= 320.0:
+                        # panel-gap shading: only large faces (gaps invisible
+                        # below that) and only when no outline already draws it
+                        aa_lines(tgt, (max(0, fc[0] - 46),
+                                       max(0, fc[1] - 46),
+                                       max(0, fc[2] - 46), 70), True, pts)
                 except Exception:
                     pass
+        else:
+            for dsz, pts, fc, outline, ow, bb in polys:
+                try:
+                    draw_poly(tgt, fc, pts)
+                    if outline is not None:
+                        draw_poly(tgt, outline, pts, ow)
+                except Exception:
+                    pass
+
+        if view_override is None and polys:
+            if work is not None:
+                # GLOSSY STUDIO FLOOR: the transparent face buffer flips about
+                # the ground line and fades out -- a believable reflection for
+                # ~zero extra rasterisation cost.
+                H = surf.get_height()
+                gy = int(gy1)
+                bh = int(min(H, rect.bottom) - gy)
+                if 0 <= gy < H - 4 and bh > 8:
+                    bh = min(bh, gy + 1)
+                    # flip only the source band (not the whole screen buffer)
+                    band = work.subsurface(
+                        pygame.Rect(0, gy - bh + 1, surf.get_width(), bh))
+                    refl = pygame.transform.flip(band, False, True)
+                    refl.blit(self._fade_grad(surf.get_width(), bh),
+                              (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+                    surf.blit(refl, (0, gy))
+            # SOFT GROUND SHADOW seated under the footprint, above the floor.
+            sw = min(rect.w * 0.9, (gx1 - gx0) * 1.05)
+            sh = max(14.0, sw * 0.16)
+            spr = self._shadow_sprite(int(sw), int(sh))
+            surf.blit(spr, (int((gx0 + gx1) / 2 - sw / 2),
+                            int(gy1 - sh * 0.30)),
+                      special_flags=pygame.BLEND_PREMULTIPLIED)
+            if work is not None:
+                surf.blit(work, (0, 0))
+                surf.blit(self._vignette(rect.w, rect.h), rect.topleft)
 
         # Fuel-injection + combustion flash at each piston's ONE FIXED ignition
         # area (the rim-top injector). The flash does not travel around the ring;
@@ -2958,6 +3382,14 @@ def _face_normal(cam_pts, face):
     if n[2] > 0:
         n = -n
     return n
+
+
+# Studio-lighting basis for the flat-face renderer (see EngineRenderer.render):
+# the KEY light is the renderer's self.light; FILL_L is a cool camera-side fill
+# that lifts the previously crushed front faces; HALF_L is the Blinn half-vector
+# (key + view direction) that puts a metallic sheen band across lit faces.
+FILL_L = (-0.28, -0.22, -0.93)
+HALF_L = (0.527, 0.791, -0.313)
 
 
 def _mix(c1, c2, t):
@@ -3063,7 +3495,7 @@ def solve_electrical(bus_kw):
     (traction draw, +) and regen (charge, -). Bus current I = P / V_pack (P = V x I);
     the copper cable drops I^2 x R and the inverter drops (1 - eff) x P. Returns the
     live bus state the ECU commands and the drive HUD reads. The inverter + motor
-    efficiencies are the components the aggregate 97% drivetrain figure is built from;
+    efficiencies are the components the aggregate 99% drivetrain figure is built from;
     the cable I^2R is the small extra shown explicitly (wiring is honest, not a guess)."""
     p_w = abs(bus_kw) * 1000.0
     amps = p_w / BUS["pack_v_nom"]
@@ -3350,12 +3782,15 @@ def solve_engine_physics(k, combustions, temp_c, coolant_flow, hyd_cmd,
         * PHYS["main_clutch_radius_m"]
     ring_torque_nm = ring_clamp_kn * 1000.0 * PHYS["friction_mu_wet"] \
         * PHYS["ring_bind_radius_m"]
+    # ring-clutch slip is taken across the boundary gap: `lock` is the engaged
+    # fraction of the outermost pressurized layer (fill x pinion mesh).
+    lock = clamp(k.get("lock", bind))
     slip_main_rpm = abs(rpm - core_rpm)
-    slip_ring_rpm = abs(core_rpm * max(0.0, k.get("gr", 1.0) - 1.0) * (1.0 - bind))
+    slip_ring_rpm = abs(core_rpm * max(0.0, k.get("gr", 1.0) - 1.0) * (1.0 - lock))
     slip_main_kw = main_torque_nm * (slip_main_rpm * 2.0 * math.pi / 60.0) / 1000.0
     slip_ring_kw = ring_torque_nm * (slip_ring_rpm * 2.0 * math.pi / 60.0) / 1000.0
     slip_heat_kw = min(PHYS["friction_kw_cap"],
-                       (slip_main_kw * (1.0 - c1) + slip_ring_kw * (1.0 - bind))
+                       (slip_main_kw * (1.0 - c1) + slip_ring_kw * (1.0 - lock))
                        * max(0.0, slip_load))
     friction_kw = slip_heat_kw + bearing_kw
 
@@ -3509,13 +3944,15 @@ class Powertrain:
         return 0.5 * self.fly_I * w * w / 3.6e6
 
     def _mech(self, dt, firing, moving):
-        """Animate the mechanical drivetrain state (ring RPM + clutch/ring bind)."""
+        """Animate the mechanical drivetrain state (ring RPM + clutch/gap fill).
+        While firing, the ring clutch runs HIGH-PRESSURE coupling (full lock);
+        off-load it vents to a light drag so the pack freewheels."""
         target_rpm = (FIRING_GEN_RPM if firing
                       else (FIRING_IDLE_RPM if moving else 0.0))
         self.ring_rpm += (target_rpm - self.ring_rpm) * min(1.0, dt * 2.5)
         tgt_c1 = 1.0 if firing else (0.25 if moving else 0.0)
         self.clutch1_engage += (tgt_c1 - self.clutch1_engage) * min(1.0, dt * 3)
-        self.trans_bind += ((0.9 if firing else 0.15)
+        self.trans_bind += ((1.0 if firing else 0.18)
                             - self.trans_bind) * min(1.0, dt * 3)
 
     def route_storage(self, dE, dt):
@@ -3622,8 +4059,8 @@ class Powertrain:
         # pure routing-synergy win: nothing that is used the same instant is buffered.
         self._route_net_kw = engine_kw + regen_kw - trac_kw
 
-        # flywheel idles down very slowly (magnetic bearings, <0.3% drag)
-        self.fly_omega *= max(0.0, 1.0 - dt * 0.0006)
+        # flywheel idles down very slowly (HTS magnetic bearings, <0.15%/h drag)
+        self.fly_omega *= max(0.0, 1.0 - dt * 0.0003)
         self.soc = min(ELEC["soc_max"] + 0.001, max(0.02, self.soc))
 
         if self.fuel_gal > 1e-6:
@@ -3684,11 +4121,36 @@ class DriveWorld:
         f_aero = -0.5 * VEH["air_density"] * cd * VEH["frontal_area_m2"] * self.v * abs(self.v)
         f_roll = -sgn * effective_crr() * m * g * math.cos(grade)
         f_grav = -m * g * math.sin(grade)
+        # downhill EM-rail regen HOLD-BACK: banking gravity power is only real
+        # if the rail applies the opposing force it harvests (Lenz). Gravity
+        # pays the aero/roll resistance DIRECTLY at 100% first -- pushing that
+        # energy through the storage round-trip would lose ~4% -- so the rail
+        # holds back only the SURPLUS pull that would overspeed the car, and
+        # releases below the cruise set point so descents accelerate for free.
+        f_reghold = 0.0
+        if grade < 0 and sgn != 0.0:
+            f_surplus = f_grav + f_aero + f_roll    # >0 = gravity overspeeds
+            if f_surplus > 0.0:
+                over = not (self.cruise and self.gear > 0
+                            and self.v < self.cruise_set)
+                f_reghold = -sgn * min(0.95 * f_surplus,
+                                       0.95 * abs(f_grav)) * over
 
-        # cruise control (forward only): add energy only when needed
+        # cruise control (forward only): add energy only when needed.
+        # FORCE-DOMAIN feedforward + trim: holding speed needs rail force equal
+        # to the current resistance, so request a Newton force (resistance +
+        # a bounded Newton-per-(m/s) error trim) and convert to throttle via
+        # rail_force = throttle * rail_w / v. A raw throttle-space gain slams
+        # the rail on/off around the setpoint -- at low speed the P/v
+        # amplification turns a ~15 N job into multi-kW surges that overshoot
+        # into the brake, and the traction bill ends up ~8x the real road load
+        # (which alone can sink the solar-sustained MPG balance).
         if self.cruise and self.gear > 0:
             err = self.cruise_set - self.v
-            throttle = max(0.0, min(1.0, err * 0.6))
+            res_n = -(f_aero + f_roll + f_grav + f_reghold)
+            want_n = res_n + err * 150.0
+            throttle = max(0.0, min(1.0, want_n * max(abs(self.v), 2.0)
+                                  / (VEH["max_rail_kw"] * 1000.0)))
             if err < -0.5:
                 brake = min(1.0, -err * 0.25)
                 self.regen_brake = True
@@ -3698,7 +4160,8 @@ class DriveWorld:
         f_rail = rail_force * self.gear            # rail directly rotates the wheel
         f_brake = -sgn * brake * VEH["max_brake_n"]
 
-        self.v += (f_rail + f_brake + f_aero + f_roll + f_grav) / m * dt
+        self.v += (f_rail + f_brake + f_aero + f_roll + f_grav
+                   + f_reghold) / m * dt
         if self.gear < 0:
             self.v = max(self.v, self.REVERSE_MAX)
         # don't let braking drag the car backwards through a standstill
@@ -3706,10 +4169,17 @@ class DriveWorld:
             self.v = 0.0
         self.dist_m += self.v * dt
 
-        demand_w = abs(f_rail) * abs(self.v) if throttle > 0.01 else 0.0
+        # Motoring demand = rail force in the direction of travel (f_rail * v > 0
+        # only when the rail pushes the car the way it is moving -- forward in D,
+        # backward in R). Measuring the APPLIED force, not the throttle input,
+        # keeps the energy bill honest at the cruise equilibrium where the
+        # proportional throttle hovers near zero but the rail still does work.
+        demand_w = max(0.0, f_rail * self.v)
         regen_w = brake * VEH["max_brake_n"] * abs(self.v)
-        if grade < 0:
-            regen_w += m * g * (-math.sin(grade)) * abs(self.v) * 0.6
+        if f_reghold:
+            # downhill EM-rail regen: the credited watts equal the hold-back
+            # force's real work exactly -- no hold, no credit.
+            regen_w += abs(f_reghold) * abs(self.v)
         road_power_kw = (demand_w - regen_w) / 1000.0
 
         v_mph = self.v * 2.23694
@@ -3744,8 +4214,12 @@ INFO_SECTIONS = [
         "boiler, active morphing aero + super-HYDROPHOBIC slip skin + a through-body",
         "FLOW DUCT + passive DRAG-AIR capture + a parked WINDMILL, magnetic wheel",
         "bearings, PCM heat banking, thermoelectrics and predictive control, and even",
-        "takes free passenger PEDAL power. Stress/high-speed ~738 MPG; favorable slow",
+        "takes free passenger PEDAL power. Stress/high-speed ~1030 MPG; favorable slow",
         "routes can be fuel-free under the M-chart assumptions (see 6c-6h, 8b-8d, M).",
+        "MULTI-FUNCTIONAL SYSTEM: every power-saving path stacks. At LOW SPEED or",
+        "light load they cover the whole road load -> effectively INFINITE MPG",
+        "(fuel-free, INF on the dash). At higher speed, or whenever the stack is",
+        "not being used, the rotary burns fuel and CHARGES the battery instead.",
     ]),
     ("1. ROTARY PISTON(S) + FIRING MODEL (the circular 'piston')", [
         "Outer dia %.0f mm | inner hollow %.0f mm | thick %.0f mm (very thin)." % (
@@ -3869,26 +4343,34 @@ INFO_SECTIONS = [
         "reduce stall. Wound up by downhill / coast momentum while the engine is",
         "OFF. Magnetic bearings, <0.3%% drag, safe to %.0f RPM." % FLYWHEEL_MAX_RPM,
     ]),
-    ("4. TRANSMISSION = GEAR WET CLUTCH (concentric ring layers)", [
-        "%d concentric RING LAYERS -- and each ring IS its own GEAR RATIO. The" % DIMS['trans_rings'],
-        "rings act like a second, multi-plate WET CLUTCH just for the gears: they",
-        "BIND together to engage. The TRANSMISSION BIND (Trans Wet Clutch) slider",
-        "is that wet-clutch pressure -- FULL bind = the selected gear locks solid",
-        "(1:1, no slip); LESS bind = MORE SLIP. So the lower the transmission bind,",
-        "the more the selected gear (e.g. gear 2) slips against the core.",
-        "A separate SET-GEAR shifter (the Gear slider) picks WHICH ring is engaged;",
-        "the rest stay disengaged. Every ring carries TEETH on its INNER edge and",
-        "the receival gear shifts to the selected ring edge. Lives inside the",
-        "hollow (thin engine). Rings, not discs.",
-        "Ratios are calculated from actual ring pitch radii: %.2f:1 -> %.2f:1." % (
+    ("4. TRANSMISSION = MULTILAYER RING CLUTCH (concentric hyd-gap layers)", [
+        "%d concentric RING LAYERS -- each ring IS a gear, and the ANNULAR GAP" % DIMS['trans_rings'],
+        "inside every ring is a wet-clutch layer. High-pressure hydraulic fluid",
+        "fills each gap and couples the rings by friction from the CENTRE",
+        "OUTWARD: inner gaps lock first, and the outermost gap under pressure is",
+        "the SLIPPED layer that modulates output (the RING-GAP PRESSURE slider).",
+        "FULL pressure = the selected gear locks solid -- a minimally flexible,",
+        "super-durable gear that carries all output torque. PARTIAL pressure =",
+        "the gear stays LOCKED IN PLACE (pinion meshed) while its boundary gap",
+        "slips: a high-pressure-coupling DISENGAGEMENT without moving anything.",
+        "Engage harder -> the fill wave reaches a higher ring -> it slips harder.",
+        "The RATCHET SHIFTER only slides UP: it disengages from the engaged ring,",
+        "seats the small receival pinion at the next unengaged ring, and ONLY",
+        "THEN does gap pressure ramp the new gear's output. A downshift vents,",
+        "returns the pinion to the inner park rail, and slides up to the target.",
+        "Every ring carries TEETH on its inner edge, so the one pinion fits all",
+        "teeth from the centre out. Lives inside the hollow (thin engine).",
+        "Ratios from actual ring pitch radii: %.2f:1 -> %.2f:1." % (
             trans_ratios()[0], trans_ratios()[-1]),
     ]),
     ("5. OUTPUT GEAR + GENERATOR (charges battery/caps)", [
-        "A toothed receival gear MESHES the transmission ring teeth and rotates on",
-        "its OWN axis (a normal gear), with a small unavoidable ~%.0f deg pivot" % DIMS['out_angle_deg'],
-        "angle loss. It drives the axial-flux generator, whose output CHARGES the",
-        "batteries + capacitors -- it does NOT drive the wheels. The battery energizes",
-        "the wheel rails directly; this engine is only a range-extender.",
+        "A single small toothed RECEIVAL pinion fits the inner-edge teeth of every",
+        "ring; the ratchet shifter slides it UP the rail to the selected ring and",
+        "it counter-rotates on its OWN axis -- a normal gear taking the ~%.0f deg" % DIMS['out_angle_deg'],
+        "unavoidable pivot angle loss (see the side view in image.png). It drives",
+        "the axial-flux generator, whose output CHARGES the batteries + caps -- it",
+        "does NOT drive the wheels. The battery energizes the wheel rails",
+        "directly; this engine is only a range-extender.",
     ]),
     ("6. ELECTRIC + ENERGY STRATEGY", [
         "Battery %.0f kWh held in a %.0f-%.0f%% SOC window for max regen room." % (
@@ -3938,7 +4420,7 @@ INFO_SECTIONS = [
             _fmt_mpg(estimate_mpg_baseline(50, 1, False)),
             _fmt_mpg(estimate_mpg(50, 1, False)), mpg_gain_label(50),
             _fmt_mpg(estimate_mpg(50, 4, True))),
-        "80 mph = ~%.0f MPG. Stress/high-speed ~738; favorable slow routes can be fuel-free --" % estimate_mpg(80, 1, False),
+        "80 mph = ~%.0f MPG. Stress/high-speed ~%.0f; favorable slow routes can be fuel-free --" % (estimate_mpg(80, 1, False), estimate_mpg(80, 1, False)),
         "reached by hardly ever burning fuel, not by magic.",
     ]),
     ("6d. REAL-LIFE MPG vs SPEED  (press M for the chart)", [
@@ -3978,7 +4460,7 @@ INFO_SECTIONS = [
         " - TRIBOELECTRIC/TYRE/PIEZO: reclaim a slice of the tyre + body HYSTERESIS that",
         "   rolling resistance already dissipates (capped to %.0f%% of rolling loss)." % (
             HARVEST_ROLL_FRAC * 100),
-        "So in bright sun, below ~50 mph the SOLAR alone can cover the whole road",
+        "So in bright sun, below ~10-25 mph the SOLAR alone can cover the whole road",
         "load -> fuel-free (solar-sustained), no pedals and no fuel.",
         "DOWNHILL FLYWHEEL: on descents, gravity + inertia wind the free-floating",
         "%.0f kg tungsten flywheel through the low-slip clutch (no combustion), and" % DIMS['flywheel_mass_kg'],
@@ -3987,7 +4469,7 @@ INFO_SECTIONS = [
             ELEC['soc_min'] * 100, ELEC['soc_max'] * 100),
         "is always empty room to swallow the next brake, hill and harvest. The rotary",
         "fires only when battery + flywheel + harvest cannot meet demand, then stops.",
-        "Stress/high-speed ~738 MPG; favorable slow/harvest-rich routes can be fuel-free.",
+        "Stress/high-speed ~%.0f MPG; favorable slow/harvest-rich routes can be fuel-free." % estimate_mpg(80, 1, False),
     ]),
     ("6f. NEW EFFICIENCY STACK  (active aero, PCM, TEG, predictive)", [
         "V1.17 stacks five more fuel-free levers on top of the above -- each shown",
@@ -4141,12 +4623,11 @@ INFO_SECTIONS = [
         "The flywheel + core run on the same passive-magnetic principle (<0.3%% drag).",
     ]),
     ("8d. THROUGH-BODY FLOW DUCT (kill the rear vacuum / wake drag)", [
-        "A wide, thin hollow duct runs from a low front-GRILL intake through the body",
-        "to a rear DIFFUSER. FINAL-PASS refinement: the exit is RAISED to the base-wake",
-        "CENTROID (mid-height) at the tail, where the low-pressure vacuum is STRONGEST,",
-        "so the through-flow fills it more directly than a floor-level exit. It lets",
-        "high-pressure nose air flow right through the car and 'fill' that rear vacuum,",
-        "attacking PRESSURE (form) drag -- the DOMINANT source above ~50 mph.",
+        "A wide, thin, STRAIGHT hollow duct runs from a low front-GRILL intake, 100%%",
+        "straight through the body, to a rear DIFFUSER. It lets high-pressure nose air",
+        "flow right through the car and exit into the low-pressure WAKE behind it,",
+        "'filling' that rear vacuum pocket. That attacks PRESSURE (form) drag -- the",
+        "DOMINANT drag source above ~50 mph -- instead of just skin friction.",
         "The rear diffuser widens like a VENTURI to slow the exit air smoothly and",
         "recover pressure, so the wake is calmer and the car sheds a big turbulent",
         "low-pressure region. Scaled straight-through pipe (%.0f x %.0f mm, ~%.1f m)" % (
@@ -4156,8 +4637,8 @@ INFO_SECTIONS = [
         "Effect: it cuts the effective Cd ~%.0f%% at low speed rising to ~%.0f%% at" % (
             DUCT["base"] * DUCT["blend"] * 100, (DUCT["base"] + DUCT["speed"]) * DUCT["blend"] * 100),
         "highway speed (the wake vacuum grows with speed), folded straight into the",
-        "Cd so the M chart AND drive economy both show it -- ~10%% MPG at 80 mph and",
-        "up to ~26%% at 50 mph in this final pass. It pairs with the boat-tail, morphing",
+        "Cd so the M chart AND drive economy both show it -- an estimated 12-20%% MPG",
+        "gain at highway speed. It pairs with the boat-tail, morphing aero, hydrophobic",
         "skin and drag-capture grooves: the skin slips most air, the grooves catch the",
         "remainder, and the duct MOVES the useful air through -- so the car behaves",
         "like a near-perfect streamlined body. Parked, the duct doubles as passive",
@@ -4308,7 +4789,7 @@ INFO_SECTIONS = [
         " - FLYWHEEL (round-trip %.0f%%): mechanical OVERFLOW when both are full/empty." % (
             STORAGE["flywheel_rt"] * 100),
         "WHY THE ARRANGEMENT IS OPTIMAL: routing the fast cycling through the near-",
-        "lossless supercaps keeps the effective round-trip ~96%%, far above cycling it",
+        "lossless supercaps keeps the effective round-trip ~99%%, far above cycling it",
         "all through the battery. The optimizer (300k+ tests) also found the supercap",
         "should be sized for PEAK POWER, NOT bulk energy -- a bigger bank barely improves",
         "the round-trip but supercaps are HEAVY (~125 kg/kWh), so oversizing LOSES MPG.",
@@ -4330,13 +4811,13 @@ INFO_SECTIONS = [
         " - OPERATING POINT: 3,288 firing points (RPM x combustions/rev) were swept",
         "   through the REAL engine physics, then heat recovery was bounded to actual",
         "   same-second heat flow so stored boiler heat is not double-counted.",
-        "   Result: %.0f RPM x 8/rev gives %.1f%% net fuel->electricity vs %.1f%% before." % (
-            FIRING_GEN_RPM, 52.9, 52.2),
+        "   Result: %.0f RPM x 8/rev gives %.1f%% net fuel->wheel vs 52.2%% before." % (
+            FIRING_GEN_RPM, FUEL_TO_WHEEL_EFF * 100),
         " - CONTROL POLICY: swept the SOC window + burst thresholds over a DEMANDING",
         "   run (85 mph, hills, low sun 0.05, low initial SOC). Result: the current",
         "   fire threshold was already right; lowering the stop target to %.0f%% keeps" % (
             ENGINE_OFF_SOC * 100),
-        "   more regen headroom. Stress case: ~738 MPG, engine-on ~17.8%%; favorable",
+        "   more regen headroom. Stress case: ~%.0f MPG (80 mph), engine-on low;" % estimate_mpg(80, 1, False),
         "   routes are much higher because road load is tiny and harvest covers more.",
         "CONCLUSION: across generation, conversion, storage AND control, every path now",
         "sits at its physics-bounded ceiling; the only remaining 'losses' are the ones",
@@ -4344,13 +4825,177 @@ INFO_SECTIONS = [
         "and the tiny, correct storage round-trip the one-pass routing minimises. The",
         "system is at its engineered OPTIMUM. Re-run the two optimizer scripts anytime.",
     ]),
+    ("BLUEPRINT -- ROTARY COMBUSTION CORE (drawing notes)", [
+        "BLOCK: Inconel 718 billet, rough-forged then HIP densified; 5-axis milled",
+        "   to finished trochoid. Chamber bores crosshatch-honed 30 deg, Ra 0.4 um,",
+        "   0.05 mm side-seal clearance; 8x 166 cc chambers, volume tol +/-0.2 cc.",
+        "ROTOR/RINGS: forged 9310 pinions, carburized 0.9-1.2 mm case, 60-62 HRC,",
+        "   DIN 5 ground flanks. Apex seals C-SiC ceramic on Inconel springs.",
+        "SHAFT: 300M vac-arc remelt, gun-drilled Ø18 mm gallery; journals ground",
+        "   Ø40 h6 (±8 um, Ra 0.2); nitrided 0.4 mm; balance grade G1.0 @ 12k rpm.",
+        "FASTENING: Inconel studs, torque 22 N·m + 90 deg turn, pair-tightened in",
+        "   3 passes; all rotating hardware safety-wired per MS20995.",
+        "QC: 100% CMM first-article (GD&T per drawing tree), dye-penetrant on all",
+        "   cast surfaces, 2h dyno pass-off at 2 430 rpm / 132 kPa manifold.",
+    ]),
+    ("BLUEPRINT -- MULTILAYER RING-CLUTCH TRANSMISSION", [
+        "RING LAYERS (6x): forged 9310 steel rings, annular clutch lands finished",
+        "   to 0.40 mm gap ±0.02 mm; ta-C DLC 2 um on friction lands (mu ~0.10",
+        "   wet). Brazed Ø2.5 mm radial oil galleries, 12 per ring, deburred.",
+        "HYDRAULIC CIRCUIT: radial-piston pump 450 bar proof; service band",
+        "   0-250 bar; bladder accumulator 0.75 L @ 90 bar N2 precharge.",
+        "   Proportional spool valves ±2% hysteresis; ISO VG46, 10 um filtration.",
+        "SEALS: PEEK anti-extrusion backup + FKM lip seal per gap; leak budget",
+        "   <1 cc/min per gap at service pressure; bench-burst 400 bar x 3.",
+        "SHIFT MECHANISM: up-only ratchet shifter, case-hardened rail, detent",
+        "   ball + spring seat per ring; pinion seat verified by contact patch",
+        "   (Prussian blue) before pressure ramp is enabled in software.",
+        "ASSEMBLY: rings nested centre-out on the carrier jig, gap set with",
+        "   ground ceramic feeler gauges; output runout <15 um TIR on the pinion.",
+    ]),
+    ("BLUEPRINT -- EM RAIL-RING DRIVE & HV ELECTRICAL", [
+        "RAIL STATOR: 96-pole hybrid array -- Bi-2223 HTS tape windings @ 65 K",
+        "   (40-layer MLI cryostat, getter-pumped) + N52 NdFeB Halbach assist;",
+        "   rated 320 kW traction, 350 kN·m continuous in the standalone unit.",
+        "WHEEL MODULE: forged 7075-T6 rim, PM levitation gap 1.5 mm nominal;",
+        "   airless metamaterial tyre -- TPU lattice shear-band, moulded in one",
+        "   shot; service interval 60 000 km.",
+        "HV BUS: 800 V nominal, superconducting busbar on the boiler cryo tap",
+        "   (~0 I²R loss); SiC inverter 99.6%, rail motor-gen 99.7% -> 99.3% drive.",
+        "BATTERY: LFP prismatic 96S2P structural pack, %.0f kWh; laser-welded" % ELEC["batt_kwh"],
+        "   Cu/Al busbars, per-cell fuse links, IP67; doubles as monocoque shear",
+        "   panel (torque-box load path verified to 8 g crash case).",
+        "SUPERCAP: graphene 2.7 V 3000 F modules x24S, %.2f kWh; active balancers;" % ELEC["supercap_kwh"],
+        "   sized for peak-power cycling, not bulk energy.",
+        "FLYWHEEL: W90-Ni-Cu alloy Ø220x45 mm in 0.05 mbar vacuum can; HTS",
+        "   magnetic bearings (<0.15%/h idle decay); rated 40 000 rpm,",
+        "   burst-containment per SAE J1240 spin test.",
+    ]),
+    ("BLUEPRINT -- BODY, AERO & HARVEST SURFACES", [
+        "MONOCOQUE: T800/EP carbon prepreg 2x2 twill, [0/±45/90]s quasi-iso",
+        "   layup; autoclave 180 °C / 6 bar / 3 h; NOMEX-core sandwich floor;",
+        "   datum tolerance ±0.5 mm/m; bonded joints Sika 265 + peel ply prep.",
+        "SKIN: super-hydrophobic riblet film, 8 um V-grooves, UV-cured;",
+        "   contact angle 165 deg; peel-and-replace sacrificial top layer.",
+        "SOLAR: GaAs triple-junction 33% cells, ~3.2 m² active, ETFE front;",
+        "   per-group bypass diodes, IP67 laminate edge seal, 800 V MPPT.",
+        "WINDSHIELD LENS: PMMA Fresnel 2 mm, MgF2 AR coating, 40:1 onto boiler",
+        "   absorber strip; ±15 deg micro-tracking servos.",
+        "AERO DEVICES: through-body duct 320x140 mm throat with NiTi/CF flap;",
+        "   Ø180 mm drag-capture micro-turbine auto-louvers; deployable Ø1.1 m",
+        "   parked-windmill rotor on tail-fin tower (furl >18 m/s).",
+        "CANOPY: stretched acrylic 4 mm + PC 2 mm laminate, 99% UV, bonded.",
+    ]),
+    ("BLUEPRINT -- MASTER DIMENSION & SERVICE TABLE", [
+        "VEHICLE: L/W/H 3820/1600/1150 mm; wheelbase 2500; track 1350;",
+        "   curb mass 765 kg; Cd 0.08 (0.072 morphed); area 1.58 m²; Crr .0028",
+        "   (.0015 effective w/ mag bearings); ground clearance 110 mm.",
+        "ENGINE: Ø~720 mm ring dia, 8x 166 cc = 1.33 L swept; firing to",
+        "   %.0f rpm gen-rated; lean AFR target; 3.7-26 bar boiler band." % FIRING_GEN_RPM,
+        "TRANSMISSION: 6 ring layers, ratio spread 3.75:1 down to creep .06;",
+        "   hydraulic service 0-250 bar, proof 400; shift = up-only ratchet.",
+        "TORQUE MAP (key joints): engine studs 22 N·m+90° | ring carrier 38 N·m",
+        "   | wheel module 110 N·m | battery frame 45 N·m | damper top 28 N·m.",
+        "FLUIDS: ISO VG46 hydraulic 3.2 L | gear oil PAO 75W 0.6 L | ammonia",
+        "   boiler charge ~26 C boil / -78 C freeze | coolant PG50 6 L.",
+        "SERVICE: engine oil 25k km | hyd filter 50k | tyre lattice 60k |",
+        "   boiler fluid 8 yr | battery coolant loop 8 yr | DLC lands life-of.",
+    ]),
+    ("MANUFACTURING FLOW -- BUILD SEQUENCE (station map)", [
+        "S1  ROTARY CORE: cast/HIP rings -> 5-axis chamber mill -> hone -> seal",
+        "    fit -> dry spin G1.0 balance -> chamber volume audit.",
+        "S2  CLUTCH STACK: ring lands finish-ground -> DLC -> gallery braze ->",
+        "    seal stack -> gap set w/ ceramic feelers -> 400 bar burst bench.",
+        "S3  E-DRIVE: HTS winding vacuum-impregnate -> cryostat MLI wrap ->",
+        "    stator potting -> wheel module marriage -> rail run-in bench.",
+        "S4  MONOCOQUE: layup -> autoclave -> trim -> battery shear-panel bond",
+        "    -> canopy bond -> skin film apply (clean room).",
+        "S5  FINAL: HV harness -> fluid fills -> software flash (ECU 200 Hz",
+        "    loop) -> 4-post dyno pass-off: cruise sweep + regen + ring-clutch",
+        "    slip/lock verification, all recorded to the vehicle log.",
+    ]),
+    ("BLUEPRINT -- MATERIALS & MASS BREAKDOWN (BOM)", [
+        "ROTARY CORE      Inconel 718 + 9310 gears           ~118 kg",
+        "RING CLUTCH      9310 rings + DLC lands + hyd pack   ~46 kg",
+        "GENERATOR        Cu litz + N52UH + Si-steel          ~38 kg",
+        "RAIL DRIVES x4   7075 rims + HTS windings + PM       ~92 kg",
+        "BATTERY          LFP prismatic %.0f kWh structural   ~255 kg" % ELEC["batt_kwh"],
+        "SUPERCAP+FLY     graphene caps + W90 flywheel        ~64 kg",
+        "MONOCOQUE+SKIN   T800/EP + NOMEX + films             ~96 kg",
+        "AERO+HARVEST     ducts, turbines, PV, dampers        ~38 kg",
+        "FLUIDS+MISC      hyd oil, coolant, ammonia, trim     ~18 kg",
+        "CURB TOTAL                                            ~765 kg",
+        "   (mass budget reconciles to the simulated curb_mass_kg constant)",
+    ]),
+    ("BLUEPRINT -- GD&T & INSPECTION PLAN", [
+        "DATUM SCHEME: A = monocoque floor pan | B = transaxle centreline |",
+        "   C = front axle plane. All rotating parts datumed off B.",
+        "CRITICAL CHARACTERISTICS (100% inspected, SPC tracked):",
+        "   clutch gap land 0.40 mm +/-0.02 | ring chamber vol 166 cc +/-0.2 |",
+        "   rail stator airgap 1.5 mm +/-0.1 | cam... (none: rotary) |",
+        "   monocoque datum holes pos. Ø0.2 MMC | wheel runout 0.3 mm TIR.",
+        "MEASUREMENT: CMM first-article per drawing tree; laser tracker for",
+        "   body-in-white; ring lands checked on air-bearing spindle; HV",
+        "   isolation hipot 2.5 kV / 60 s on every pack and busbar.",
+        "FITMENT PROOF: pinion seat verified by Prussian-blue contact patch",
+        "   >70% on every ring before the pressure ramp is enabled in sw.",
+    ]),
+    ("BLUEPRINT -- WIRING, HARNESS & CONNECTORS", [
+        "HV HARNESS: superconducting busbar spines pack->inverter->rail",
+        "   (cryo tap on boiler loop); branch HV cables 50 mm² silicone,",
+        "   orange per ISO 6469; all HV connectors IP6K9K + HVIL interlocked.",
+        "LV HARNESS: 48 V ring main, ENET backbone to ECU; sensor looms",
+        "   twisted-shielded pair; DTM sealed connectors throughout.",
+        "ECU / CONTROL: traction control unit 200 Hz fixed-rate loop,",
+        "   6000 A/s current-slew cap; dual watchdog + safe-state relay.",
+        "GROUNDING: single-point chassis star at battery B-; rail stators",
+        "   case-grounded; HVIL loop breaks all contactors <50 ms.",
+    ]),
+    ("BLUEPRINT -- TEST & VALIDATION MATRIX", [
+        "DYNO: engine pass-off 2 h @ rated point; ring-clutch slip/lock",
+        "   sweep 0-250 bar logged; rail drive back-to-back efficiency map.",
+        "CLIMATE: -30 C cold soak start (ammonia fluid boil margin) |",
+        "   +50 C heat rejection | salt fog 480 h on exposed fasteners.",
+        "DURABILITY: 4-post road simulator 600 h | wheel modules 1M cycle",
+        "   levitation | clutch 250k shift engagements @ 250 bar.",
+        "EMC/SAFETY: ISO 11451 radiated immunity | HVIL fault-injection |",
+        "   crash case 8 g on battery shear panel | roll-over pack integrity.",
+        "END-OF-LINE: every car -- cruise sweep, regen meter, ring-clutch",
+        "   lock % readout, harvest wattmeter; results to the vehicle log.",
+    ]),
+    ("BLUEPRINT -- FASTENER & TORQUE INDEX", [
+        "Engine block studs (Inconel M10)          22 N·m + 90° turn, 3 passes",
+        "Ring-clutch carrier bolts (M8 12.9)       38 N·m, threadlocker 243",
+        "Pinion nut (M22x1.5 left-hand)           120 N·m + staked",
+        "Generator rotor bolts (M6 Ti)             14 N·m, dry film",
+        "Wheel module axle nuts (M24)             110 N·m, cotter locked",
+        "Battery frame bolts (M10 Al)              45 N·m, isolator washers",
+        "Damper top mounts (M8)                    28 N·m",
+        "Flywheel containment ring (M12)           68 N·m, cross-pattern",
+        "Canopy bond / clamps                     fixture cure, no torque",
+        "All safety-critical fasteners: MS20995 safety-wired or pinned.",
+    ]),
+    ("BLUEPRINT -- SERVICE & LIFECYCLE", [
+        "PREVENTIVE: engine oil + filter 25k km | hydraulic fluid + 10 um",
+        "   element 50k km | tyre lattice inspection 60k km | coolant 8 yr.",
+        "WEAR ITEMS: apex seals ~150k km design life | clutch DLC lands",
+        "   life-of-vehicle | pinion inspect at clutch service | FKM seals",
+        "   10 yr replacement window.",
+        "BOILER FLUID: ammonia charge 8 yr (service log tracks heat life;",
+        "   fluid_health drifts <1.0 as it ages -- swap restores recovery).",
+        "HV SAFETY: orange-cable isolation procedure, 10 min capacitor",
+        "   bleed-down before any HV connector opens.",
+        "END OF LIFE: monocoque thermoset -> pyrolysis fibre recovery;",
+        "   HTS windings + NdFeB reclaimed; LFP pack second-life static",
+        "   storage; all fluids drain-and-account per log.",
+    ]),
     ("CONTROLS", [
         "TAB ... cycle ENGINE PREVIEW > CAR VIEW > DRIVE   M ... MPG   I ... info   H ... help",
         "CAR VIEW: the WHOLE vehicle to real-life scale -- its own 1/2/3 + 4/X views (8e)",
         "PREVIEW/CAR VIEWS:  1 = FULL   2 = EXPLODED   3 = ASSEMBLY",
         "SECTION-CUT:  4 or X = toggle the cross-section over FULL / EXPLODED",
         "PREVIEW/CAR: drag orbit | wheel zoom-at-cursor | right/middle pan | L labels chip",
-        "         hover a part = read spec card | click = pin / unpin selection",
+        "         B = blueprint grid + Ø callouts | hover = spec card | click = pin",
         "TEST BENCH: drag the left sliders (power, hydraulic, main clutch, bind, gear)",
         "PLAYBACK: P pause | - / = view speed | [ ] pistons 1-10 | , . combustions 1-8",
         "ASSEMBLY: click or N = place next part | B = back | F = all | 0 = clear",
@@ -4359,7 +5004,43 @@ INFO_SECTIONS = [
         "        K = passenger PEDAL-ASSIST | F = boiler working fluid",
         "ESC ........ quit",
     ]),
+    ("SPEC -- CONTROLS (SPEC SHEET)", [
+        "SPEC tab (or TAB to it): manufacturing specification sheet.",
+        "   left list = all 46 parts (ENGINE/VEHICLE groups, item numbers)",
+        "   click a row or up/down keys = select | wheel = scroll list",
+        "   centre card = full spec + MFG block + drawing record + live state",
+        "   right = master tables (dims, torque, fluids, BOM, QC, connectors)",
+        "   ENTER/D = full per-part DETAIL PAGE (3D + complete record)",
+        "   ITEM ## balloons on the B blueprint match the list's item numbers",
+    ]),
 ]
+
+
+def _constants_rows():
+    """Auto-generated appendix: every tunable simulation constant, verbatim --
+    the authoritative parameter table behind the sim. Always complete because
+    it is generated from the dicts themselves."""
+    rows = []
+    for name, d in (("VEHICLE", VEH), ("CAR BODY", CAR), ("DIMENSIONS", DIMS),
+                    ("ELECTRICAL", ELEC), ("HV BUS", BUS), ("THERMAL", THERM),
+                    ("STORAGE", STORAGE)):
+        rows.append("[%s]" % name)
+        for kk in sorted(d):
+            v = d[kk]
+            rows.append("   %-22s = %.6g" % (kk, v) if isinstance(v, float)
+                        else "   %-22s = %s" % (kk, v))
+        rows.append("")
+    import inspect
+    g = inspect.currentframe().f_globals
+    for kk in sorted(g):
+        if kk.isupper() and isinstance(g[kk], (int, float)) \
+                and not kk.startswith(("MODE_", "TOP_", "BOTTOM_")):
+            rows.append("   %-22s = %.6g" % (kk, g[kk]))
+    return rows
+
+
+INFO_SECTIONS.insert(-2, ("SPEC -- CALIBRATION CONSTANTS (FULL TABLE)",
+                          _constants_rows()))
 
 
 # =============================================================================
@@ -4421,18 +5102,21 @@ class App:
     MODE_PREVIEW = 0        # engine 3D view (test bench)
     MODE_DRIVE = 1          # drive the car
     MODE_CAR = 2            # whole-vehicle 3D view (full / exploded / assembly)
+    MODE_SPEC = 3           # manufacturing spec sheet (BOM, torque, GD&T, parts)
 
     def __init__(self):
         pygame.init()
-        pygame.display.set_caption("GmansRun V1.17 -- HOHEV-Rotary Gen 4 Digital Twin (FINAL prototype)")
+        pygame.display.set_caption("GmansRun V1.17 -- HOHEV-Rotary Gen 4 Digital Twin")
         self.W, self.H = 1600, 920
         self.screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
         self.clock = pygame.time.Clock()
-        mono = "consolas,dejavusansmono,monospace"
+        mono = "consolas,menlo,dejavusansmono,monospace"
         self.font = pygame.font.SysFont(mono, 16)
         self.fbig = pygame.font.SysFont(mono, 30, bold=True)
         self.fhuge = pygame.font.SysFont(mono, 64, bold=True)
         self.fsmall = pygame.font.SysFont(mono, 13)
+        self.fb = pygame.font.SysFont(mono, 20, bold=True)   # topbar title
+        self.fm = pygame.font.SysFont(mono, 11)              # chips / micro-labels
 
         self.renderer = EngineRenderer()
         # separate WHOLE-CAR renderer (its own full/exploded/assembly + section views),
@@ -4474,9 +5158,16 @@ class App:
         self.fly_rpm_v = 0.0
         self.supercharger_engage = 0.0
         self.group_angle = {"default": 0.0}        # live angle per kinematic group
+        # --- multilayer ring-clutch state (image.png) ------------------------
+        self.sel_pos = TRANS_PARK_POS              # shifter ring position (ratchet up-only)
+        self._shifter_park = False                 # True while resetting to the park rail
+        self.sel_radius = output_gear_mesh_radius(0)   # live pinion radius while sliding
+        self.gap_fill = [0.0] * DIMS["trans_rings"]    # per-gap hydraulic engagement 0..1
         self.kin = {"piston": 0, "core": 0, "gen": 0, "out": 0, "trans_out": 0,
                     "ratio": 1.0, "gear": 1, "ngear": DIMS["trans_rings"], "gr": 1.0,
                     "slip1": 0, "bind_slip": 0, "fly": 0, "ep": 0, "c1": 0, "bind": 0,
+                    "lock": 0.0, "mesh": 0.0, "seated": 0, "slip_layer": -1,
+                    "sel_pos": TRANS_PARK_POS,
                     "combust_min": 0, "super": 0.0, "boost": 1.0}
         # thermal + heat-recovery state
         self.temp_c = THERM["ambient_c"]
@@ -4490,6 +5181,7 @@ class App:
         self.pedal_engage = 0.0                      # ramp 0..1
         self.pedal_wh = 0.0                          # cumulative pedal energy (Wh)
         self.ambient_kw = 0.0                        # live multi-layer ambient harvest
+        self._net_kw = 0.0                           # smoothed net power into storage
         self.harvest_wh = 0.0                        # cumulative ambient harvest (Wh)
         self.teg_kw = 0.0                            # live thermoelectric harvest
         self.susp_kw = 0.0                           # live dynamic suspension harvest
@@ -4532,6 +5224,14 @@ class App:
         self.pedal_extend = 0.0                      # pop-out pedals extended 0..1
         self.show_help = True
         self.show_labels = False                     # per-part name callouts OFF by default
+        self.blueprint = False                       # B: engineering-grid blueprint mode
+        self._bp_cache = {}
+        self.spec_sel = 0                            # SPEC sheet: selected part row
+        self.spec_scroll = 0                         # SPEC sheet: parts-list scroll px
+        self._spec_rows = []                         # clickable row rects (per frame)
+        self._thumb = None                           # SPEC sheet: 3D thumbnail renderer
+        self._thumb_sel = -1                         # which spec_sel the thumb shows
+        self.spec_page = False                       # SPEC: full per-part detail page
         #                                              (clean view); L / chip toggles them on
         self._labels_chip = None                     # clickable LABELS toggle rect
         self.info_scroll = 0
@@ -4546,15 +5246,33 @@ class App:
         self.running = True
         self._frame = 0                              # global frame counter
         self._inset_cache = None                     # cached LIVE-ENGINE drive inset
+        self._car_cache = None                       # cached drive-mode car render
+        self._mc = {}                                # per-mode model view caches
+        self._mc_due = True                          # force a model re-render
         self.elec = solve_electrical(0.0)            # live HV-bus electrical state
+        self.fps = 0.0                               # smoothed frame rate (topbar)
+        self._mode_tab_rects = {}                    # clickable mode tabs in the topbar
+        self._view_tab_rects = []                    # clickable view chips (1/2/3/4)
         self.bg = None
         self._rebuild_bg()
 
     def _rebuild_bg(self):
         self.bg = pygame.Surface((self.W, self.H))
         vgradient(self.bg, BG_TOP, BG_BOT)
+        # grey model-viewport gradient: better contrast under the shaded 3D faces
+        self.bg_model = pygame.Surface((self.W, self.H))
+        vgradient(self.bg_model, BG_MODEL_TOP, BG_MODEL_BOT)
         self._sky = pygame.Surface((self.W, self.H))   # cached drive sky gradient
         vgradient(self._sky, C_SKY1, C_SKY2)
+        # low sun + halo baked into the sky cache (static, costs nothing live)
+        sunx, suny = int(self.W * 0.78), int(self.H * 0.16)
+        for r in range(90, 12, -6):
+            t = r / 90.0
+            pygame.draw.circle(self._sky,
+                               _mix((255, 244, 190), C_SKY1, t),
+                               (sunx, suny), r)
+        pygame.draw.circle(self._sky, (252, 248, 216), (sunx, suny), 12)
+        self._clouds = None                          # built lazily in draw_road
 
     def _preview_like(self):
         """True in either 3D-inspection mode (engine PREVIEW or whole-CAR view)."""
@@ -4569,9 +5287,17 @@ class App:
     def handle_events(self, dt):
         keys = pygame.key.get_pressed()
         for e in pygame.event.get():
+            # discrete interactions in a model view force the cached frame to
+            # refresh immediately (motion rides the adaptive rate instead, so
+            # orbiting a slow machine doesn't defeat the cache)
+            if self._preview_like() and e.type in (
+                    pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP,
+                    pygame.MOUSEWHEEL, pygame.KEYDOWN):
+                self._mc_due = True
             if e.type == pygame.QUIT:
                 self.running = False
             elif e.type == pygame.VIDEORESIZE:
+                self._mc.clear()
                 self.W, self.H = max(1120, e.w), max(700, e.h)
                 self.screen = pygame.display.set_mode((self.W, self.H), pygame.RESIZABLE)
                 self._rebuild_bg()
@@ -4581,7 +5307,8 @@ class App:
                 elif e.key == pygame.K_TAB:
                     self.mode = {self.MODE_PREVIEW: self.MODE_CAR,
                                  self.MODE_CAR: self.MODE_DRIVE,
-                                 self.MODE_DRIVE: self.MODE_PREVIEW}[self.mode]
+                                 self.MODE_DRIVE: self.MODE_SPEC,
+                                 self.MODE_SPEC: self.MODE_PREVIEW}[self.mode]
                 elif e.key == pygame.K_i:
                     self.show_info = not self.show_info
                 elif e.key == pygame.K_m:
@@ -4610,6 +5337,9 @@ class App:
                 elif self._preview_like() and self._rend().view == "assembly" \
                         and e.key == pygame.K_0:
                     self._rend().assembly_clear()
+                elif e.key == pygame.K_b and self._preview_like() \
+                        and self._rend().view != "assembly":
+                    self.blueprint = not self.blueprint
                 elif e.key == pygame.K_p and self._preview_like():
                     self.paused = not self.paused
                 elif e.key == pygame.K_MINUS and self._preview_like():
@@ -4622,6 +5352,13 @@ class App:
                     self.renderer.set_pistons(self.renderer.n_pistons - 1)
                 elif e.key == pygame.K_RIGHTBRACKET and self.mode == self.MODE_PREVIEW:
                     self.renderer.set_pistons(self.renderer.n_pistons + 1)
+                elif e.key == pygame.K_DOWN and self.mode == self.MODE_SPEC:
+                    self.spec_sel = min(self.spec_sel + 1, 65535)
+                elif e.key == pygame.K_UP and self.mode == self.MODE_SPEC:
+                    self.spec_sel = max(0, self.spec_sel - 1)
+                elif e.key in (pygame.K_RETURN, pygame.K_d) \
+                        and self.mode == self.MODE_SPEC:
+                    self.spec_page = not self.spec_page   # full detail page
                 elif e.key == pygame.K_COMMA and self.mode == self.MODE_PREVIEW:
                     self.combustions = max(1, self.combustions - 1)
                 elif e.key == pygame.K_PERIOD and self.mode == self.MODE_PREVIEW:
@@ -4648,6 +5385,34 @@ class App:
                 if self.show_info:
                     continue
                 if e.button == 1:
+                    # clickable top-bar mode tabs (ENGINE / CAR / DRIVE)
+                    if any(rr.collidepoint(e.pos)
+                           for rr in self._mode_tab_rects.values()):
+                        for m, rr in self._mode_tab_rects.items():
+                            if rr.collidepoint(e.pos):
+                                self.mode = m
+                        continue
+                    # clickable view chips (1 FULL / 2 EXPLODED / 3 ASSEMBLY /
+                    # 4 SECTION) in the model tabs
+                    if self._preview_like():
+                        for vr, vmode in self._view_tab_rects:
+                            if vr.collidepoint(e.pos):
+                                if vmode == "section":
+                                    self._rend().toggle_section()
+                                else:
+                                    self._rend().set_view(vmode)
+                                break
+                        else:
+                            vr = None
+                        if vr is not None:
+                            continue
+                    # SPEC sheet: left-column part list selects the spec card
+                    if self.mode == self.MODE_SPEC:
+                        for rr, gi in self._spec_rows:
+                            if rr.collidepoint(e.pos):
+                                self.spec_sel = gi
+                                break
+                        continue
                     # click the LABELS toggle chip (engine preview + car view)
                     if self._preview_like() and self._labels_chip \
                             and self._labels_chip.collidepoint(e.pos):
@@ -4667,7 +5432,8 @@ class App:
                 elif e.button in (2, 3):
                     self.panning = True
                 elif e.button in (4, 5) and self._preview_like():
-                    rect = pygame.Rect(0, 34, self.W, self.H - 34)
+                    rect = pygame.Rect(0, TOP_BAR_H, self.W,
+                                       self.H - TOP_BAR_H - BOTTOM_BAR_H)
                     factor = 0.82 if e.button == 4 else 1.22
                     self._rend().zoom_at(factor, e.pos, rect)
             elif e.type == pygame.MOUSEBUTTONUP:
@@ -4696,8 +5462,11 @@ class App:
             elif e.type == pygame.MOUSEWHEEL:
                 if self.show_info:
                     self.info_scroll = max(0, self.info_scroll - e.y * 30)
+                elif self.mode == self.MODE_SPEC:
+                    self.spec_scroll = max(0, self.spec_scroll - e.y * 24)
                 elif self._preview_like():
-                    rect = pygame.Rect(0, 34, self.W, self.H - 34)
+                    rect = pygame.Rect(0, TOP_BAR_H, self.W,
+                                       self.H - TOP_BAR_H - BOTTOM_BAR_H)
                     factor = 0.82 ** e.y if e.y > 0 else 1.22 ** (-e.y)
                     self._rend().zoom_at(factor, pygame.mouse.get_pos(), rect)
 
@@ -4757,8 +5526,16 @@ class App:
 
     def _kinematics(self, dt, drive):
         """Live drivetrain kinematics: piston -> main clutch (slip) -> core ->
-        transmission ring-bind selector -> output gear -> generator.
-        Advances every group's angle by its true RPM, and records readouts."""
+        MULTILAYER RING-CLUTCH transmission -> receival pinion -> generator.
+
+        Per image.png: the annular gap beside each ring is a wet-clutch layer
+        fed by high-pressure hydraulic fluid. Pressure couples the layers from
+        the CENTRE OUTWARD, so the outermost gap under pressure is the "slipped
+        layer" modulating output. The ratchet shifter only SLIDES UP -- a lower
+        gear is reached by venting, returning to the inner park rail, then
+        sliding up to seat the pinion BEFORE pressure ramps output. A gear can
+        therefore stay locked in place while its boundary gap slips (a high-
+        pressure-coupling disengagement). Advances every group's angle."""
         nrings = DIMS["trans_rings"]
         ratios = trans_ratios()
         if drive:
@@ -4784,10 +5561,48 @@ class App:
         target = ep * duty * MAX_PISTON_RPM * (0.96 + 0.04 * boost)
         self.piston_rpm += (target - self.piston_rpm) * min(1.0, dt * 1.5)
         core = self.piston_rpm * c1                 # main clutch slip (piston->core)
-        gr = ratios[gear]
-        eff = 1.0 + (gr - 1.0) * bind               # ring-bind blends 1:1 -> gear
-        trans_out = core * eff                      # bound transmission output
-        selected_inner = trans_ring_edges()[gear][0] + 0.006
+
+        # --- RATCHET SHIFTER: slides UP only --------------------------------
+        # To reach a LOWER ring it first vents, returns to the inner park rail,
+        # then slides up to the target and seats the pinion. Output only flows
+        # once the pinion is meshed AT a ring edge.
+        tgt = float(gear)
+        if tgt < self.sel_pos - 1e-3:
+            self._shifter_park = True
+        if self._shifter_park:
+            self.sel_pos = max(TRANS_PARK_POS,
+                               self.sel_pos - dt * TRANS_SLIDE_RATE * 2.4)
+            if self.sel_pos <= TRANS_PARK_POS + 1e-3:
+                self._shifter_park = False
+        elif self.sel_pos < tgt:
+            self.sel_pos = min(tgt, self.sel_pos + dt * TRANS_SLIDE_RATE)
+        seated = max(0, min(nrings - 1, int(round(self.sel_pos))))
+        on_ring = 0.0 <= self.sel_pos <= nrings - 1
+        mesh = (clamp(1.0 - abs(self.sel_pos - seated) * 5.0)
+                if on_ring else 0.0)                # pinion tooth engagement
+        self.sel_radius = output_gear_mesh_radius_f(self.sel_pos)
+
+        # --- HYDRAULIC GAP FILL, centre -> outward ---------------------------
+        # The same supply pressurizes every gap, but the fill WAVE engages the
+        # layers in order from the core outward: inner gaps lock first and the
+        # outermost gap under pressure is the one slipping ("engage harder;
+        # shift higher; slip harder"). Gaps past the selected ring stay dry.
+        ngap = seated + 1
+        fills = [clamp(bind * ngap - k) if k <= seated else 0.0
+                 for k in range(nrings)]
+        fill_sel = fills[seated] if on_ring else 0.0
+        lock = fill_sel * mesh                       # output lock at the pinion
+        slip_layer = -1
+        for k in range(seated, -1, -1):
+            if 0.005 < fills[k] < 0.995:
+                slip_layer = k                        # the gap currently slipping
+                break
+        gr = ratios[seated]
+        eff = TRANS_CREEP + (gr - TRANS_CREEP) * lock   # output ratio vs core
+        trans_out = core * eff                          # ring-stack output rpm
+        self.gap_fill = fills
+
+        selected_inner = trans_ring_edges()[seated][0] + 0.006
         rog = DIMS["out_gear_d_mm"] * 0.001 / 2
         out_ratio = selected_inner / max(0.001, rog)
         out = -trans_out * out_ratio                # meshed gear counter-rotates
@@ -4801,9 +5616,11 @@ class App:
             core = max(core, self.fly_rpm_v * 0.15)  # flywheel can reduce stall
 
         self.kin = dict(piston=self.piston_rpm, core=core, gen=gen, out=out,
-                        trans_out=trans_out, ratio=eff, gear=gear + 1, ngear=nrings,
+                        trans_out=trans_out, ratio=eff, gear=seated + 1, ngear=nrings,
                         gr=gr, slip1=(1.0 - c1) * 100.0,
-                        bind_slip=(1.0 - bind) * 100.0,
+                        bind_slip=(1.0 - lock) * 100.0,
+                        lock=lock, mesh=mesh, seated=seated,
+                        slip_layer=slip_layer, sel_pos=self.sel_pos,
                         fly=self.fly_rpm_v, ep=ep, c1=c1, bind=bind,
                         combust_min=self.piston_rpm * combustion_count(self._eff_comb),
                         super=sc, boost=boost)
@@ -4830,12 +5647,21 @@ class App:
                "steam": steam_spin, "recov2": core * 1.8 + (300.0 if ep > 0.02 else 0.0),
                "wheel": wheel_rpm, "pedal": pedal_spin, "static": 0.0,
                "dragturb": dragturb_spin, "windmill": windmill_spin}
+        ring_rpm = []
         for k in range(nrings):
-            if k <= gear:
-                ring_eff = 1.0 + (ratios[k] - 1.0) * bind
-                rpm["trans%d" % k] = core * ring_eff
+            if k <= seated:
+                # a ring spins between its creep rate and its locked ratio by the
+                # fill of ITS gap (the layer coupling it to the ring inside it)
+                rr = core * (TRANS_CREEP + (ratios[k] - TRANS_CREEP) * fills[k])
             else:
-                rpm["trans%d" % k] = core * 0.08    # outer rings are not engaged
+                rr = core * TRANS_CREEP             # dry gap: viscous drag only
+            ring_rpm.append(rr)
+            rpm["trans%d" % k] = rr
+        for k in range(nrings):
+            # each gap's oil film shears between the two faces it couples, so it
+            # turns at their midpoint -- the slip across each layer is visible.
+            rpm["transgap%d" % k] = ((core if k == 0 else ring_rpm[k - 1])
+                                     + ring_rpm[k]) * 0.5
         ts = 1.0 if drive else (0.0 if self.paused else self.speeds[self.speed_idx])
         for grp, r in rpm.items():
             self.group_angle[grp] = (self.group_angle.get(grp, 0.0)
@@ -4923,6 +5749,10 @@ class App:
     # ---------------------------------------------------------------- update
     def update(self, dt):
         self._frame += 1
+        self.fps += (1.0 / max(1e-6, dt) - self.fps) * 0.06   # smoothed, for topbar
+        # quality auto-scale: anti-aliased faces only while the frame rate holds
+        aa = self.fps >= 45.0
+        self.renderer.aa = self.car.aa = aa
         self._rend().tick(dt)                  # tick the active 3D renderer (engine or car)
         drive = (self.mode == self.MODE_DRIVE)
         self.pt.block_temp_c = self.temp_c     # heat cutoff for the engine-off logic
@@ -4999,6 +5829,9 @@ class App:
             # the same instant for traction bypasses the storage round-trip entirely;
             # only the true surplus is buffered (or deficit pulled). Routing synergy.
             total_kw = self.pt._route_net_kw + charge_kw
+            # ~45 s EMA: "sustained" means the buffers net-fill over a stretch of
+            # route (climb + descent averaged), not each instantaneous hill.
+            self._net_kw += (total_kw - self._net_kw) * min(1.0, dt / 45.0)
             self.pt.route_storage(total_kw * (dt / 3600.0), dt)
             self.pedal_wh += pedal_kw * 1000.0 * (dt / 3600.0)
             self.pt.flow["pedal"] = pedal_kw
@@ -5022,66 +5855,834 @@ class App:
 
     # ----------------------------------------------------------------- draw
     def draw(self):
-        self.screen.blit(self.bg, (0, 0))
+        # the model-inspection tabs get the grey viewport for shaded-face
+        # contrast; DRIVE keeps the dark cockpit shell under its sky/road.
+        self.screen.blit(self.bg_model if self._preview_like() else self.bg, (0, 0))
         if self.mode == self.MODE_PREVIEW:
             self.draw_preview()
         elif self.mode == self.MODE_CAR:
             self.draw_carview()
+        elif self.mode == self.MODE_SPEC:
+            self.draw_specsheet()
         else:
             self.draw_drive()
+        self.draw_bottombar()
+        self.draw_topbar()
         if self.show_help:
             self.draw_help()
         if self.show_info:
             self.draw_info()
         if self.show_mpg:
             self.draw_mpg_chart()
-        self.draw_topbar()
         pygame.display.flip()
 
+    def _chip(self, x, y, text, fg, bg=None, h=20):
+        """A small rounded status chip (reference-UI style). Returns its width."""
+        img = self.fm.render(text, True, fg)
+        w = img.get_width() + 14
+        pygame.draw.rect(self.screen, bg or C_CHIP, (x, y, w, h), border_radius=3)
+        self.screen.blit(img, (x + 7, y + (h - img.get_height()) // 2))
+        return w
+
     def draw_topbar(self):
-        panel(self.screen, 0, 0, self.W, 34, alpha=190)
-        vname = {"full": "FULL", "exploded": "EXPLODED", "assembly": "ASSEMBLY"}
-        if self.mode == self.MODE_PREVIEW:
-            cut = " +SECTION-CUT" if self.renderer.section else ""
-            mode = "ENGINE PREVIEW [%s%s]" % (vname.get(self.renderer.view, "FULL"), cut)
-        elif self.mode == self.MODE_CAR:
-            cut = " +SECTION-CUT" if self.car.section else ""
-            mode = "CAR VIEW [%s%s]" % (vname.get(self.car.view, "FULL"), cut)
+        """Reference-style top bar: title block + mode blurb left, toggle-state
+        chips + fps centre-right, clickable mode tabs right-aligned."""
+        pygame.draw.rect(self.screen, C_PANEL, (0, 0, self.W, TOP_BAR_H))
+        pygame.draw.line(self.screen, C_PANEL_HI, (0, TOP_BAR_H), (self.W, TOP_BAR_H), 1)
+        self.screen.blit(self.fb.render("GmansRun V1.17", True, C_ACCENT), (14, 7))
+        x = 14 + self.fb.size("GmansRun V1.17")[0] + 16
+        self.screen.blit(self.font.render("HOHEV-Rotary Gen 4", True, C_TEXT), (x, 10))
+        x += self.font.size("HOHEV-Rotary Gen 4")[0] + 14
+        blurbs = {self.MODE_PREVIEW: "-- engine model viewer (grey viewport)",
+                  self.MODE_CAR: "-- whole-vehicle model, real-life scale",
+                  self.MODE_DRIVE: "-- test drive: multi-functional harvest EV",
+                  self.MODE_SPEC: "-- manufacturing spec sheet: BOM, torque, GD&T"}
+        blurb = blurbs[self.mode]
+        self.screen.blit(self.fm.render(blurb, True, C_TEXT_DIM), (x, 13))
+        x += self.fm.size(blurb)[0] + 18
+        # toggle-state chips (like Submarine's X:SECT / L:LBL indicators)
+        if self._preview_like():
+            r = self._rend()
+            tog = [("4", "SECT", r.section), ("L", "LBL", self.show_labels),
+                   ("B", "BP", self.blueprint), ("P", "PAUS", self.paused)]
+        elif self.mode == self.MODE_SPEC:
+            tog = []
         else:
-            mode = "DRIVE  (simulation)"
-        self.screen.blit(self.fbig.render("GmansRun V1.17", True, C_ACCENT), (12, 2))
-        t = self.font.render("MODE: %s   [TAB] engine>car>drive  [M] MPG  [I] info  [H] help" % mode,
-                             True, C_TEXT)
-        self.screen.blit(t, (self.W - t.get_width() - 12, 9))
+            tog = [("C", "CRUZ", self.world.cruise),
+                   ("E", "ENG", self.pt.engine_on),
+                   ("K", "PDL", self.pedal_on)]
+        for key, name, on in tog:
+            t = "%s:%s" % (key, name)
+            self.screen.blit(self.fm.render(t, True, C_GOOD if on else C_TEXT_DIM), (x, 13))
+            x += self.fm.size(t)[0] + 10
+        self.screen.blit(self.fm.render("%.0f fps" % self.fps, True, C_TEXT_DIM),
+                         (x + 4, 13))
+        # clickable mode tabs, right-aligned (TAB also cycles them)
+        self._mode_tab_rects = {}
+        tabs = [("ENGINE", self.MODE_PREVIEW), ("CAR", self.MODE_CAR),
+                ("DRIVE", self.MODE_DRIVE), ("SPEC", self.MODE_SPEC)]
+        tx = self.W - 10
+        mouse = pygame.mouse.get_pos()
+        for name, m in reversed(tabs):
+            tw = self.fm.size(name)[0] + 24
+            rr = pygame.Rect(tx - tw, 7, tw, TOP_BAR_H - 13)
+            self._mode_tab_rects[m] = rr
+            act = (m == self.mode)
+            hov = rr.collidepoint(mouse)
+            pygame.draw.rect(self.screen,
+                             C_ACCENT if act else (C_PANEL_HI if hov else C_CHIP),
+                             rr, border_radius=4)
+            img = self.fm.render(name, True, C_PANEL if act else C_TEXT)
+            self.screen.blit(img, img.get_rect(center=rr.center))
+            tx = rr.x - 6
+
+    def draw_bottombar(self):
+        """Solid bottom bar: per-mode hint left, live status chips right."""
+        y0 = self.H - BOTTOM_BAR_H
+        pygame.draw.rect(self.screen, C_PANEL, (0, y0, self.W, BOTTOM_BAR_H))
+        pygame.draw.line(self.screen, C_PANEL_HI, (0, y0), (self.W, y0), 1)
+        cy = y0 + (BOTTOM_BAR_H - 20) // 2
+        if self.mode == self.MODE_PREVIEW:
+            hint = "drag orbit | wheel zoom-at-cursor | right/mid pan | " \
+                   "1/2/3 view  4/X section  L labels  P pause  [ ] pistons  , . combustions"
+            k = self.kin
+            chips = [("PIST %4.0f" % k["piston"], C_RING_HOT),
+                     ("CORE %4.0f" % k["core"], C_TEXT),
+                     ("GEN %4.0f" % abs(k["gen"]), C_GOOD),
+                     ("RING %d/%d %2.0f%%" % (k["gear"], k["ngear"], k["lock"] * 100),
+                      C_ACCENT if k["lock"] > 0.6 else C_WARN),
+                     ("PAUSED" if self.paused else "%.2fx" % self.speeds[self.speed_idx],
+                      C_WARN if self.paused else C_TEXT)]
+        elif self.mode == self.MODE_CAR:
+            hint = "drag orbit | wheel zoom | right/mid pan | 1/2/3 view  " \
+                   "4/X section  L labels | hover = spec, click = pin"
+            chips = [("%.0f kg" % VEH["curb_mass_kg"], C_TEXT),
+                     ("Cd %.2f" % VEH["Cd"], C_ACCENT),
+                     ("Crr %.4f" % effective_crr(), C_GOOD),
+                     ("%d parts" % len(self.car.parts), C_TEXT_DIM)]
+        elif self.mode == self.MODE_SPEC:
+            hint = "click a part = spec card | wheel / up-down scrolls | " \
+                   "ENTER/D = full detail page | I = info | TAB cycles views"
+            flat = self.renderer.parts + self.car.parts
+            seln = flat[self.spec_sel].name if flat else "none"
+            chips = [("PARTS %d" % len(flat), C_TEXT),
+                     ("SEL %s" % seln[:28], C_ACCENT),
+                     ("MFG blocks %d" % sum(1 for p in flat if any(
+                         "MANUFACTURING" in s for s in p.specs)), C_GOOD)]
+        else:
+            hint = "W/S A/D C E R K G | multi-functional: harvest covers " \
+                   "low-speed load; faster or idle -> fuel charges the pack"
+            pt = self.pt
+            mtxt, mcol = self._power_mode()
+            chips = [(mtxt, mcol),
+                     ("SOC %3.0f%%" % (pt.soc * 100), C_ACCENT),
+                     ("CAP %3.0fWh" % (pt.cap_kwh * 1000), C_GOOD),
+                     ("FLY %4.0f" % pt.fly_rpm, C_FLYWHEEL_BAR),
+                     ("RING %d %2.0f%%" % (self.kin["gear"], self.kin["lock"] * 100),
+                      C_ACCENT if self.kin["lock"] > 0.6 else C_WARN),
+                     ("BLK %3.0fC" % self.temp_c,
+                      C_BAD if self.phys.get("shutdown") else
+                      (C_WARN if self.phys.get("overheat") else C_TEXT)),
+                     ("BOIL %3.0f/%3.0f" % (self.boiler_c, self.pcm_c), C_ACCENT),
+                     ("RECOV %.1fkW" % self.therm.get("orc_kw", 0.0), C_GOOD),
+                     ("HARV %3.0fW" % (self.ambient_kw * 1000), C_GOOD),
+                     ("PEDAL %s" % ("%3.0fW" % (
+                          DIMS["seats"] * PEDAL_WATTS_PER_SEAT * self.pedal_engage)
+                          if self.pedal_on else "off"), 
+                      C_GOOD if self.pedal_on else C_TEXT_DIM),
+                     ("%s %2.0f%%" % (self.fluid, self.fluid_life * 100),
+                      C_BAD if self.fluid_life <= 0.12 else C_TEXT),
+                     ("%6.2fmi" % pt.miles, C_TEXT_DIM)]
+        self.screen.blit(self.fm.render(hint, True, C_TEXT_DIM), (14, y0 + 9))
+        x = 14 + self.fm.size(hint)[0] + 24
+        for text, col in chips:
+            w = self.fm.size(text)[0] + 14
+            if x + w > self.W - 10:
+                break
+            self._chip(x, cy, text, col)
+            x += w + 6
+
+    def _power_mode(self):
+        """The multi-functional operating mode of the efficiency stack.
+        UNLIMITED = engine off, moving, and the smoothed charge inflow
+        (solar + every harvester + regen) covers the traction draw -- the
+        buffers fill while driving, so the cruise can run fuel-free forever."""
+        pt = self.pt
+        if pt.engine_on:
+            return "CHARGE fuel->pack", C_RING_HOT
+        if abs(self.world.v) > 0.4 and self._net_kw >= 0.0:
+            return "UNLIMITED MPG sustained", C_GOOD
+        if pt.regen_active:
+            return "REGEN momentum->pack", C_GOOD
+        if abs(self.world.v) > 0.4:
+            return "EV drive (pack)", C_ACCENT
+        if self.wind_kw > 1e-4 or self.solar_roof_kw > 1e-4:
+            return "PARK-HARVEST", C_ACCENT
+        return "IDLE", C_TEXT_DIM
 
     # ---- preview ----
     def _heat_norm(self):
         return max(0.0, min(1.0, (self.temp_c - THERM["ambient_c"])
                             / (PHYS["overheat_c"] - THERM["ambient_c"])))
 
+    def _bp_overlay(self, rect):
+        """Cached blueprint grid: minor 44px, major 220px, datum border."""
+        key = (rect.w, rect.h)
+        spr = self._bp_cache.get(key)
+        if spr is None:
+            self._bp_cache.clear()
+            spr = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
+            for x in range(0, rect.w, 44):
+                pygame.draw.line(spr, (110, 170, 230, 18), (x, 0), (x, rect.h))
+            for y in range(0, rect.h, 44):
+                pygame.draw.line(spr, (110, 170, 230, 18), (0, y), (rect.w, y))
+            for x in range(0, rect.w, 220):
+                pygame.draw.line(spr, (110, 170, 230, 40), (x, 0), (x, rect.h))
+            for y in range(0, rect.h, 220):
+                pygame.draw.line(spr, (110, 170, 230, 40), (0, y), (rect.w, y))
+            pygame.draw.rect(spr, (110, 170, 230, 55),
+                             (0, 0, rect.w - 1, rect.h - 1), 1)
+            self._bp_cache[key] = spr
+        return spr
+
+    def _draw_blueprint(self, rect):
+        """Blueprint mode (B): engineering grid + datum border + title block over
+        the viewport, with diameter callouts on the big known-OD parts."""
+        self.screen.blit(self._bp_overlay(rect), rect.topleft)
+        r = self._rend()
+        # dimension callouts: label = value + drawing tolerance (per drawing tree)
+        dia_lbl = {"trans": "Ø%.0f ±0.02 mm" % DIMS["trans_outer_d_mm"],
+                   "gen": "Ø%.0f ±0.03 mm" % DIMS["gen_d_mm"],
+                   "ring": "Ø%.0f ±0.05 mm" % DIMS["ring_outer_d_mm"],
+                   "flywheel": "Ø%.0f ±0.05 mm" % DIMS["flywheel_d_mm"],
+                   "shaft": "Ø%.0f k6 mm" % DIMS["shaft_d_mm"],
+                   "outgear": "Ø%.0f ±0.01 mm" % DIMS["out_gear_d_mm"],
+                   "engine": "Ø%.0f ±0.05 mm" % DIMS["ring_outer_d_mm"],
+                   "wheel": "Ø%.0f ±0.10 mm" % DIMS["wheel_d_mm"],
+                   "body": "W %.0f ±0.5 mm" % CAR["width_mm"],
+                   "battery": "TRK %.0f ±0.5 mm" % CAR["track_mm"],
+                   "canopy": "H %.0f ±0.5 mm" % CAR["height_mm"],
+                   "raildrive": "Ø1000 ±0.10 mm"}
+        drawn = set()
+        anchors = []
+        for pi, pcx, pcy, rad, depth, tag in getattr(r, "_last_screeninfo", ()):
+            if tag == "pending":
+                continue
+            anchors.append((pi, pcx, pcy, rad))
+            p = r.parts[pi]
+            key = p.key.rstrip("0123456789_")
+            d = dia_lbl.get(p.key) or dia_lbl.get(key)
+            if d is None or key in drawn or rad < 26:
+                continue
+            drawn.add(key)
+            pygame.draw.circle(self.screen, C_BP, (int(pcx), int(pcy)),
+                               int(rad * 0.72), 1)
+            ex, ey = pcx + rad * 0.55, pcy - rad * 0.55
+            pygame.draw.line(self.screen, C_BP, (ex, ey), (ex + 26, ey - 26), 1)
+            self.screen.blit(self.fm.render(d, True, C_BP),
+                             (ex + 30, ey - 40))
+        # BOM balloons: item-number circles on both margins, leadered to the
+        # part's screen anchor -- standard drawing-tree callouts, matching the
+        # assembly-order numbering used in the SPEC sheet.
+        left = sorted([a for a in anchors if a[1] < rect.centerx],
+                      key=lambda a: a[2])
+        right = sorted([a for a in anchors if a[1] >= rect.centerx],
+                       key=lambda a: a[2])
+        for group, bx, sgn in ((left, rect.left + 16, -1),
+                               (right, rect.right - 16, 1)):
+            n = max(1, len(group))
+            for i, (pi, pcx, pcy, rad) in enumerate(group):
+                by = rect.top + 42 + int((i + 0.5) * (rect.h - 96) / n)
+                pygame.draw.line(self.screen, (110, 170, 230),
+                                 (bx + 10 * sgn * -1, by),
+                                 (int(pcx), int(pcy)), 1)
+                pygame.draw.circle(self.screen, C_BP, (bx, by), 9, 1)
+                t = self.fm.render("%02d" % r.parts[pi].order, True, C_BP)
+                self.screen.blit(t, (bx - t.get_width() // 2, by - 6))
+        tb = ["GMANSRUN V1.17 -- HOHEV-ROTARY GEN 4",
+              "DWG %s   SCALE 1:1   UNITS mm" % (
+                  "ENG-001" if self.mode == self.MODE_PREVIEW else "VEH-001"),
+              "SHEET 1 / 1   TOL ±0.1 UNLESS NOTED"]
+        tw = max(self.fm.size(t)[0] for t in tb) + 16
+        th = len(tb) * 14 + 10
+        tx = int(rect.centerx - tw / 2)
+        ty = int(rect.bottom - th - 8)
+        pygame.draw.rect(self.screen, (18, 24, 36), (tx, ty, tw, th))
+        pygame.draw.rect(self.screen, C_BP, (tx, ty, tw, th), 1)
+        for i, t in enumerate(tb):
+            self.screen.blit(self.fm.render(t, True, C_BP), (tx + 8, ty + 6 + i * 14))
+
+    def draw_specsheet(self):
+        """MODE_SPEC -- the manufacturing specification sheet. Blueprint-grid
+        backdrop; LEFT = grouped parts list (ENGINE / VEHICLE), CENTRE = the
+        selected part's full spec card incl. its MANUFACTURING/BLUEPRINT block
+        and part metadata, RIGHT = stacked master tables (dimensions, torque
+        index, mass BOM, fluids & service). Title block bottom-right."""
+        area = pygame.Rect(0, TOP_BAR_H, self.W,
+                           self.H - TOP_BAR_H - BOTTOM_BAR_H)
+        self.screen.blit(self._bp_overlay(area), area.topleft)
+        if not self.spec_page:
+            # sheet header
+            self.screen.blit(self.fb.render(
+                "MANUFACTURING SPECIFICATION SHEET", True, C_BP),
+                (18, area.y + 12))
+            self.screen.blit(self.fsmall.render(
+                "HOHEV-Rotary Gen 4 -- per-part drawings, process, tolerance, "
+                "service data   (I = full info modal, scroll for every "
+                "section)", True, C_TEXT_DIM), (18, area.y + 34))
+
+        groups = (("ENGINE ASSEMBLY", self.renderer.parts),
+                  ("VEHICLE ASSEMBLY", self.car.parts))
+        flat = self.renderer.parts + self.car.parts
+        self.spec_sel = max(0, min(self.spec_sel, len(flat) - 1))
+        if self.spec_page:
+            self._draw_spec_page(area, flat)
+            return
+
+        # ---- LEFT: grouped parts list (scrollable, clickable) --------------
+        lx, lw = 12, 300
+        ly0, ly1 = area.y + 58, area.bottom - 14
+        panel(self.screen, lx, ly0, lw, ly1 - ly0)
+        row_h = 17
+        total = 0
+        for _, plist in groups:
+            total += 1 + len(plist)                    # header + rows
+        maxscroll = max(0, total * row_h - (ly1 - ly0 - 40))
+        self.spec_scroll = max(0, min(self.spec_scroll, maxscroll))
+        # keep the selected row visible when stepping with up/down keys
+        disp = 1 + self.spec_sel + (1 if self.spec_sel >= len(
+            self.renderer.parts) else 0)
+        ry_sel = disp * row_h
+        vis = ly1 - ly0 - 44 - row_h
+        if ry_sel - self.spec_scroll < 0:
+            self.spec_scroll = ry_sel
+        elif ry_sel - self.spec_scroll > vis:
+            self.spec_scroll = ry_sel - vis
+        self._spec_rows = []
+        clip = self.screen.get_clip()
+        self.screen.set_clip(pygame.Rect(lx, ly0 + 24, lw, ly1 - ly0 - 30))
+        ry = ly0 + 28 - self.spec_scroll
+        gi = 0
+        mouse = pygame.mouse.get_pos()
+        for gname, plist in groups:
+            if ly0 + 24 <= ry < ly1:
+                self.screen.blit(self.fsmall.render(gname, True, C_WARN),
+                                 (lx + 10, ry))
+            ry += row_h
+            for p in plist:
+                rr = pygame.Rect(lx + 6, ry, lw - 12, row_h - 1)
+                sel = (gi == self.spec_sel)
+                if sel:
+                    pygame.draw.rect(self.screen, (50, 74, 104), rr)
+                elif rr.collidepoint(mouse):
+                    pygame.draw.rect(self.screen, (34, 46, 62), rr)
+                col = C_ACCENT if sel else C_TEXT
+                self.screen.blit(self.fsmall.render(
+                    "%02d %s" % (p.order, p.name[:35]), True, col),
+                    (lx + 12, ry + 2))
+                self._spec_rows.append((rr, gi))
+                ry += row_h
+                gi += 1
+        self.screen.set_clip(clip)
+        self.screen.blit(self.fsmall.render(
+            "%d parts -- wheel scrolls" % len(flat), True, C_TEXT_DIM),
+            (lx + 10, ly1 - 20))
+        # scrollbar hint
+        if maxscroll > 0:
+            frac = self.spec_scroll / maxscroll
+            track = ly1 - ly0 - 60
+            sy = ly0 + 30 + int(frac * track * 0.8)
+            pygame.draw.rect(self.screen, C_PANEL_HI,
+                             (lx + lw - 6, sy, 3, max(18, int(track * 0.2))))
+
+        # ---- CENTRE: selected part's full spec card ------------------------
+        cx, cw = lx + lw + 12, 560
+        part = flat[self.spec_sel]
+        rows = part.specs
+        # live telemetry channel for the selected part (from the sim itself)
+        pk = part.key.rstrip("0123456789_")
+        live = self._part_live(part, pk)
+        ch = min(ly1 - ly0, 56 + len(rows) * 16 + 74 + 75
+                 + 18 + len(live) * 15 + 80)
+        panel(self.screen, cx, ly0, cw, ch)
+        self.screen.blit(self.font.render(part.name, True, C_ACCENT),
+                         (cx + 12, ly0 + 8))
+        self.screen.blit(self.fsmall.render(
+            "key %s   meshes %d   order #%d" % (
+                part.key, len(part.meshes), part.order),
+            True, C_TEXT_DIM), (cx + 12, ly0 + 28))
+        yy = ly0 + 50
+        for s in rows:
+            col = (C_GOOD if s.startswith("--- MANUFACTURING")
+                   else (C_GOOD if s.lstrip().startswith("MFG") else C_TEXT))
+            self.screen.blit(self.fsmall.render(s, True, col), (cx + 12, yy))
+            yy += 16
+        yy += 8
+        # drawing-record fields: envelope is the part's real mesh bounding box
+        asm = "ENG" if self.spec_sel < len(self.renderer.parts) else "VEH"
+        lo = np.array([1e9] * 3); hi = np.array([-1e9] * 3)
+        for m in part.meshes:
+            lo = np.minimum(lo, m.verts.min(axis=0))
+            hi = np.maximum(hi, m.verts.max(axis=0))
+        env = tuple((hi - lo) * 1000.0)
+        FASTENER = {
+            "trans": "carrier M8 x12 @ 38 N.m", "shaft": "press, no fasteners",
+            "gen": "rotor M6 Ti x8 @ 14 N.m", "outgear": "M22x1.5 LH @ 120 N.m",
+            "flywheel": "ring M12 x8 @ 68 N.m", "battery": "frame M10 x14 @ 45",
+            "suspension": "top M8 x4 @ 28 N.m", "hyd": "M12x1.5 ORFS x6",
+            "steam": "flange M8 x8 @ 24 N.m", "turbo": "V-band + M6 x4 @ 9",
+            "engine": "studs M10 x10 @ 22 N.m", "body": "bonded + M6 inserts",
+            "canopy": "bonded + M5 clamps", "boiler": "flange M8 x8 @ 24",
+            "solarroof": "bonded edge + MC4", "wheel": "axle M24 @ 110 N.m",
+        }
+        fast = FASTENER.get(part.key) or FASTENER.get(pk) or "per torque index"
+        for k2, v2 in (("ASSEMBLY ORDER", "#%d of %d" % (part.order, len(flat))),
+                       ("DRAWING NO", "DWG-%s-%03d REV C" % (asm, part.order)),
+                       ("ENVELOPE mm", "%.0f x %.0f x %.0f" % env),
+                       ("DATUM REFS", "A floor | B axle CL | C fr axle"),
+                       ("FASTENERS", fast),
+                       ("QC CLASS", "SPC-100%% | CMM first-article"),
+                       ("EXPLODE VECTOR", "(%.2f, %.2f, %.2f) m"
+                        % tuple(part.explode)),
+                       ("POP DIRECTION", "(%.2f, %.2f, %.2f)"
+                        % tuple(part.popdir)),
+                       ("MESH FACES", "%d polys" % sum(len(m.faces)
+                                                     for m in part.meshes)),
+                       ("PAINT / COLOUR", "%s" % (part.color,))):
+            self.screen.blit(self.fsmall.render(k2, True, C_TEXT_DIM),
+                             (cx + 12, yy))
+            self.screen.blit(self.fsmall.render(v2, True, C_TEXT),
+                             (cx + 170, yy))
+            yy += 15
+        self.screen.blit(self.fsmall.render("LIVE STATE", True, C_WARN),
+                         (cx + 12, yy + 2))
+        for i, s in enumerate(live):
+            self.screen.blit(self.fsmall.render(s, True, C_GOOD),
+                             (cx + 12, yy + 18 + i * 15))
+        # process route strip: OP-numbered boxes parsed from the MFG text
+        ry2 = yy + 18 + len(live) * 15 + 8
+        if ry2 + 34 < ly0 + ch:
+            self.screen.blit(self.fsmall.render("PROCESS ROUTE", True, C_WARN),
+                             (cx + 12, ry2))
+            bx = cx + 12
+            for i, op in enumerate(_proc_route(part)):
+                lbl = "OP%d %s" % ((i + 1) * 10, op)
+                bw = self.fsmall.size(lbl)[0] + 14
+                if bx + bw > cx + cw - 10:
+                    break
+                by = ry2 + 15
+                pygame.draw.rect(self.screen, (30, 44, 62), (bx, by, bw, 16))
+                pygame.draw.rect(self.screen, C_BP, (bx, by, bw, 16), 1)
+                self.screen.blit(self.fsmall.render(lbl, True, C_BP),
+                                 (bx + 7, by + 3))
+                ax = bx + bw + 2
+                pygame.draw.line(self.screen, C_BP, (ax, by + 8),
+                                 (ax + 8, by + 8), 1)
+                pygame.draw.line(self.screen, C_BP, (ax + 8, by + 8),
+                                 (ax + 4, by + 5), 1)
+                pygame.draw.line(self.screen, C_BP, (ax + 8, by + 8),
+                                 (ax + 4, by + 11), 1)
+                bx += bw + 11
+        # remaining centre space: notes + live 3D thumbnail of the part
+        ny = ly0 + ch + 8
+        if ny + 120 < ly1:
+            panel(self.screen, cx, ny, cw, ly1 - ny)
+            self.screen.blit(self.fsmall.render(
+                "SHEET NOTES", True, C_WARN), (cx + 12, ny + 8))
+            for i, s in enumerate([
+                    "All dimensions in mm unless noted. Tolerances per the",
+                    "GD&T plan (info modal). Rotating hardware balanced",
+                    "G1.0 minimum; HV per ISO 6469; every spec line above",
+                    "comes from the part's drawing record in MFG_SPEC.",
+                    "Hover the same part in ENGINE/CAR view to see it in 3D."]):
+                self.screen.blit(self.fsmall.render(s, True, C_TEXT_DIM),
+                                 (cx + 12, ny + 30 + i * 15))
+            # spinning 3D thumbnail of the selected part, right half
+            tw = int(cw * 0.46)
+            trect = pygame.Rect(cx + cw - tw - 10, ny + 8, tw, ly1 - ny - 16)
+            if trect.w > 60 and trect.h > 60:
+                if self._thumb_sel != self.spec_sel or self._thumb is None:
+                    span = 0.2
+                    for m in part.meshes:
+                        span = max(span, float(np.linalg.norm(
+                            m.verts.max(axis=0) - m.verts.min(axis=0))))
+                    self._thumb = EngineRenderer(
+                        parts_builder=(lambda pp=part: [pp]),
+                        supports_pistons=False,
+                        home_az=0.6, home_el=0.45,
+                        home_dist=max(0.35, span * 1.45))
+                    self._thumb_sel = self.spec_sel
+                self._thumb.az = pygame.time.get_ticks() * 0.00035
+                self._thumb.render(self.screen, trect, self.group_angle,
+                                   self.pt.firing_glow,
+                                   view_override="full", interactive=False)
+                pygame.draw.rect(self.screen, C_BP, trect, 1)
+                lbl = self.fm.render("ITEM %02d 3D" % part.order, True, C_BP)
+                self.screen.blit(lbl, (trect.x + 4, trect.bottom - 14))
+
+        # ---- RIGHT: stacked master tables ----------------------------------
+        rx = cx + cw + 12
+        rw = self.W - rx - 12
+        tables = [
+            ("MASTER DIMENSIONS", [
+                ("Vehicle L/W/H", "%.0f/%.0f/%.0f mm" % (
+                    CAR["length_mm"], CAR["width_mm"], CAR["height_mm"])),
+                ("Wheelbase/track", "%.0f / %.0f mm" % (
+                    CAR["wheelbase_mm"], CAR["track_mm"])),
+                ("Curb mass", "%.0f kg" % VEH["curb_mass_kg"]),
+                ("Cd / Crr eff", "%.2f / %.4f" % (VEH["Cd"], effective_crr())),
+                ("Rotary ring", "Ø%.0f x %.0f mm, %d ch x %.0f cc" % (
+                    DIMS["ring_outer_d_mm"], DIMS["ring_thickness_mm"],
+                    DIMS["chambers"], 166.0)),
+                ("Ring clutch", "Ø%.0f mm, %d layers, 0.40 mm gaps" % (
+                    DIMS["trans_outer_d_mm"], DIMS["trans_rings"])),
+                ("Generator", "Ø%.0f x %.0f mm axial-flux" % (
+                    DIMS["gen_d_mm"], DIMS["gen_thick_mm"])),
+                ("Wheel module", "Ø%.0f x %.0f mm rail-ring" % (
+                    DIMS["wheel_d_mm"], DIMS["wheel_width_mm"])),
+                ("Pack", "%.0f kWh @ %.0f V" % (
+                    ELEC["batt_kwh"], BUS["pack_v_nom"])),
+                ("Supercap / fly", "%.2f kWh / %.0f kg W90" % (
+                    ELEC["supercap_kwh"], DIMS["flywheel_mass_kg"])),
+            ]),
+            ("TORQUE INDEX (N·m)", [
+                ("Engine studs M10", "22 + 90°"),
+                ("Clutch carrier M8", "38 (243)"),
+                ("Pinion nut M22x1.5 LH", "120 + stake"),
+                ("Gen rotor M6 Ti", "14 dry film"),
+                ("Wheel axle M24", "110 cotter"),
+                ("Battery frame M10", "45 iso-wash"),
+                ("Damper top M8", "28"),
+                ("Flywheel ring M12", "68 x-pattern"),
+            ]),
+            ("FLUIDS & SERVICE", [
+                ("Hydraulic ISO VG46", "3.2 L / 50k km"),
+                ("Gear oil PAO 75W", "0.6 L / life"),
+                ("Boiler (ammonia)", "8 yr charge"),
+                ("Coolant PG50", "6 L / 8 yr"),
+                ("Engine oil", "25k km"),
+                ("Tyre lattice", "60k km inspect"),
+                ("FKM clutch seals", "10 yr window"),
+            ]),
+            ("MASS BOM (kg)", [
+                ("Rotary core", "118"),
+                ("Ring clutch+hyd", "46"),
+                ("Generator", "38"),
+                ("Rail drives x4", "92"),
+                ("Battery LFP", "255"),
+                ("Supercap+fly", "64"),
+                ("Monocoque+skin", "96"),
+                ("Aero+harvest", "38"),
+                ("Fluids+trim", "18"),
+                ("CURB TOTAL", "765"),
+            ]),
+            ("QC & VALIDATION", [
+                ("Clutch gap land", "0.40 ±0.02 mm"),
+                ("Chamber volume", "166 ±0.2 cc"),
+                ("Rail airgap", "1.5 ±0.1 mm"),
+                ("Wheel runout", "0.3 mm TIR"),
+                ("Datum holes", "Ø0.2 MMC"),
+                ("HV hipot", "2.5 kV/60 s"),
+                ("Balance grade", "G1.0"),
+            ]),
+            ("CONNECTORS & HARNESSES", [
+                ("HV pack main", "HVSL 800 V"),
+                ("Rail phases x4", "3ph SC potted"),
+                ("HVIL loop", "series / covers"),
+                ("LV backbone", "48 V Deutsch DT"),
+                ("Boiler feed", "1/4 SS Swagelok"),
+                ("Clutch hyd", "M12x1.5 ORFS x6"),
+                ("Can bus", "CAN-FD 5 Mbps"),
+            ]),
+        ]
+        half = (len(tables) + 1) // 2
+        tw2 = (rw - 8) // 2
+        for col, tt in enumerate((tables[:half], tables[half:])):
+            tx0 = rx + col * (tw2 + 8)
+            ty = ly0
+            for tname, trows in tt:
+                th = 30 + len(trows) * 15
+                if ty + th > ly1:
+                    break
+                panel(self.screen, tx0, ty, tw2, th)
+                self.screen.blit(self.fsmall.render(tname, True, C_WARN),
+                                 (tx0 + 10, ty + 7))
+                for i, (a, b) in enumerate(trows):
+                    self.screen.blit(self.fsmall.render(a, True, C_TEXT_DIM),
+                                     (tx0 + 10, ty + 26 + i * 15))
+                    self.screen.blit(self.fsmall.render(b, True, C_TEXT),
+                                     (tx0 + tw2 - self.fsmall.size(b)[0] - 10,
+                                      ty + 26 + i * 15))
+                ty += th + 8
+        # ---- title block ----------------------------------------------------
+        tb = ["GMANSRUN V1.17 -- HOHEV-ROTARY GEN 4",
+              "DWG MFG-001   SCALE NTS   UNITS mm",
+              "SHEET 1 / 1   TOL ±0.1 UNLESS NOTED"]
+        tw = max(self.fm.size(t)[0] for t in tb) + 16
+        th = len(tb) * 14 + 10
+        tx, ty2 = area.right - tw - 8, area.bottom - th - 8
+        pygame.draw.rect(self.screen, (18, 24, 36), (tx, ty2, tw, th))
+        pygame.draw.rect(self.screen, C_BP, (tx, ty2, tw, th), 1)
+        for i, t in enumerate(tb):
+            self.screen.blit(self.fm.render(t, True, C_BP),
+                             (tx + 8, ty2 + 6 + i * 14))
+
+    def _part_live(self, part, pk):
+        """Live telemetry rows for a part, read from the running sim."""
+        k = self.kin
+        mph = abs(self.world.v) * 2.23694
+        if part.key == "trans":
+            return ["ring %d/%d seated | mesh %.0f%% | ratio %.2f"
+                    % (k["seated"] + 1, k["ngear"], k["mesh"] * 100,
+                       k["ratio"]),
+                    "lock %.0f%% | slip-gap %s | bind %.0f%%"
+                    % (k["lock"] * 100,
+                       str(k["slip_layer"] + 1) if k["slip_layer"] >= 0
+                       else "none", k["bind_slip"]),
+                    "gap fill [%s]" % ", ".join(
+                        "%.0f%%" % (f * 100) for f in self.gap_fill)]
+        if pk == "ring":
+            return ["core %.0f rpm | %d chambers firing %.0f/min"
+                    % (k["core"], DIMS["chambers"], k["combust_min"])]
+        if pk == "clutch1":
+            return ["C1 engagement %.0f%% | slip %.0f%%"
+                    % (k["c1"] * 100, k["slip1"])]
+        if part.key == "shaft":
+            return ["core %.0f rpm | trans bind %.0f%%"
+                    % (k["core"], k["bind_slip"])]
+        if part.key == "gen":
+            return ["gen %.0f rpm | bus %.0f V | engine %s"
+                    % (k["gen"], BUS["pack_v_nom"],
+                       "RUNNING" if self.pt.engine_on else "OFF")]
+        if part.key == "outgear":
+            return ["out %.0f rpm | gr %.2f | trans_out %.0f rpm"
+                    % (k["out"], k["gr"], k["trans_out"])]
+        if part.key == "hyd":
+            return ["cmd %.0f%% x pressure %.0f%% | service 250 bar"
+                    % (self.trans_bind_cmd * 100, self.hyd_pressure * 100)]
+        if part.key == "flywheel":
+            return ["flywheel %.0f rpm | W90 rim" % k["fly"]]
+        if part.key in ("steam", "boiler"):
+            return ["boiler %.0f C | steam %.1f bar / %.2f kW"
+                    % (self.boiler_c, self.therm.get("steam_bar", 0.0),
+                       self.therm.get("steam_kw", 0.0))]
+        if part.key == "battery":
+            return ["SOC %.0f%% of %.0f kWh | 800 V bus"
+                    % (self.pt.soc * 100, ELEC["batt_kwh"])]
+        if part.key == "supercap":
+            return ["%.2f of %.2f kWh bank" % (self.pt.cap_kwh,
+                                              ELEC["supercap_kwh"])]
+        if part.key == "engine":
+            return ["%s | fuel %.4f gal | piston %.0f rpm"
+                    % ("RUNNING" if self.pt.engine_on else "OFF",
+                       self.pt.fuel_gal, k["piston"])]
+        if part.key == "turbo":
+            return ["spool %.0f rpm | exhaust recovery" % k.get("super", 0.0)]
+        if part.key == "supercharger":
+            return ["boost x%.2f | sc %.0f rpm" % (k["boost"], k["super"])]
+        if part.key == "pedals":
+            return ["assist %s | ramp %.0f%% | %.1f Wh banked"
+                    % ("ON" if self.pedal_on else "off",
+                       self.pedal_engage * 100, self.pedal_wh)]
+        if pk == "wheel" or part.key == "raildrive":
+            return ["v %.1f mph (%.2f m/s) | wheel %.0f rpm"
+                    % (mph, abs(self.world.v),
+                       abs(self.world.v) / (2 * math.pi
+                                            * VEH["wheel_radius_m"]) * 60.0)]
+        if part.key in ("solarroof", "sunlens", "harvest", "windmill",
+                        "dragcapture", "hydroskin", "suspension",
+                        "pendulum", "flowduct", "wheelgen", "recov2",
+                        "coolring", "shield", "inj", "compression"):
+            return ["see EFFICIENCY STACK in DRIVE mode for live W flow"]
+        return ["static structure -- no live telemetry channel"]
+
+    def _draw_spec_page(self, area, flat):
+        """Full detail page for ONE part (ENTER/D on the spec sheet): the
+        complete drawing record -- big 3D, full spec text, every record field,
+        vertical process route, mass estimate, live telemetry."""
+        part = flat[self.spec_sel]
+        pk = part.key.rstrip("0123456789_")
+        asm = "ENG" if self.spec_sel < len(self.renderer.parts) else "VEH"
+        dwg = "DWG-%s-%03d" % (asm, part.order)
+        # envelope + rough mass estimate from the mesh bbox & material density
+        lo = np.array([1e9] * 3); hi = np.array([-1e9] * 3)
+        for m in part.meshes:
+            lo = np.minimum(lo, m.verts.min(axis=0))
+            hi = np.maximum(hi, m.verts.max(axis=0))
+        env = (hi - lo) * 1000.0
+        txt = " ".join(part.specs).lower()
+        dens = next((d for kw, d in (
+            ("tungsten", 17.0), ("w90", 17.0), ("inconel", 8.19),
+            ("9310", 7.85), ("300m", 7.85), ("steel", 7.85),
+            ("ti-6al", 4.43), ("titanium", 4.43), ("7075", 2.81),
+            ("6061", 2.70), ("aluminum", 2.70), ("copper", 8.96),
+            ("cu-", 8.96), ("litz", 8.90), ("t800", 1.60),
+            ("carbon", 1.60), ("nomex", 1.35), ("peek", 1.32),
+            ("lfp", 2.60), ("graphene", 2.20), ("silicon", 2.33),
+            ("polymer", 1.20), ("rubber", 1.15), ("glass", 2.50),
+            ("ceramic", 3.90), ("ammonia", 0.68), ("abs", 1.05))
+            if kw in txt), 4.0)
+        mass_est = (env[0] * env[1] * env[2]) / 1e9 * dens * 1000.0 * 0.38
+        ra = re.search(r"ra\s*([0-9.]+)", txt)
+        finish = ("Ra %s per drawing" % ra.group(1)) if ra else "Ra 1.6 std"
+        # header
+        self.screen.blit(self.fb.render(
+            "ITEM %02d -- %s" % (part.order, part.name), True, C_BP),
+            (18, area.y + 8))
+        self.screen.blit(self.fsmall.render(
+            "%s REV C   SHEET 1/1   UNITS mm   (ENTER/D = back to sheet)"
+            % dwg, True, C_TEXT_DIM), (18, area.y + 32))
+        # LEFT: big 3D view + size block
+        pw = int(area.w * 0.40)
+        panel(self.screen, 12, area.y + 54, pw, area.h - 70)
+        if self._thumb_sel != self.spec_sel or self._thumb is None:
+            span = max(0.2, float(np.linalg.norm(env) * 0.001))
+            self._thumb = EngineRenderer(
+                parts_builder=(lambda pp=part: [pp]), supports_pistons=False,
+                home_az=0.6, home_el=0.45, home_dist=max(0.35, span * 1.45))
+            self._thumb_sel = self.spec_sel
+        self._thumb.az = pygame.time.get_ticks() * 0.00035
+        self._thumb.render(self.screen, pygame.Rect(
+            24, area.y + 66, pw - 24, area.h - 250),
+            self.group_angle, self.pt.firing_glow,
+            view_override="full", interactive=False)
+        dy = area.bottom - 170
+        for a, b in (("ENVELOPE", "%.0f x %.0f x %.0f mm" % tuple(env)),
+                     ("MASS (est)", "~%.1f kg  (%.2f g/cc fill 0.38)"
+                      % (mass_est, dens)),
+                     ("FINISH", finish),
+                     ("ASSEMBLY", "#%d of %d | explode (%.2f,%.2f,%.2f) m"
+                      % (part.order, len(flat), *part.explode)),
+                     ("GEOMETRY", "%d meshes / %d polys / %d verts"
+                      % (len(part.meshes),
+                         sum(len(m.faces) for m in part.meshes),
+                         sum(len(m.verts) for m in part.meshes)))):
+            self.screen.blit(self.fsmall.render(a, True, C_TEXT_DIM),
+                             (24, dy))
+            self.screen.blit(self.fsmall.render(b, True, C_TEXT), (160, dy))
+            dy += 17
+        # MIDDLE: the full spec text, nothing trimmed
+        mx = 16 + pw
+        mw = int(area.w * 0.335)
+        panel(self.screen, mx, area.y + 54, mw, area.h - 70)
+        self.screen.blit(self.fsmall.render(
+            "PART SPECIFICATION (verbatim)", True, C_WARN), (mx + 10, area.y + 62))
+        yy = area.y + 84
+        for s in part.specs:
+            col = (C_GOOD if s.startswith("--- MANUFACTURING")
+                   or s.lstrip().startswith("MFG") else C_TEXT)
+            self.screen.blit(self.fsmall.render(s, True, col), (mx + 10, yy))
+            yy += 16
+            if yy > area.bottom - 24:
+                self.screen.blit(self.fsmall.render("...", True, C_TEXT_DIM),
+                                 (mx + 10, yy))
+                break
+        # RIGHT: complete drawing record + route + live
+        rx = mx + mw + 8
+        rw = area.right - rx - 12
+        rec = [
+            ("DRAWING RECORD", [
+                ("Drawing no", dwg), ("Revision", "C (released)"),
+                ("Units / scale", "mm / NTS"),
+                ("Tolerance", "±0.1 gen; per GD&T plan"),
+                ("Datums", "A floor | B axle CL | C fr axle"),
+                ("Envelope", "%.0fx%.0fx%.0f" % tuple(env)),
+                ("Mass", "~%.1f kg est" % mass_est),
+                ("Finish", finish),
+                ("Fasteners", "per torque index"),
+                ("QC", "SPC-100% | CMM first-article"),
+                ("Mat cert", "AMS/EN10204 3.1"),
+                ("Status", "production intent"),
+            ]),
+            ("PROCESS ROUTE", [(("OP%02d" % ((i + 1) * 10)), op)
+                               for i, op in enumerate(_proc_route(part))]),
+            ("LIVE STATE", [("%d" % (i + 1), s)
+                            for i, s in enumerate(self._part_live(part, pk))]),
+            ("REVISION HISTORY", [
+                ("REV A", "initial release"),
+                ("REV B", "DLC lands + oil galleries"),
+                ("REV C", "current -- verified"),
+            ]),
+        ]
+        ty = area.y + 54
+        for tname, trows in rec:
+            th = 30 + len(trows) * 15
+            if ty + th > area.bottom - 14:
+                break
+            panel(self.screen, rx, ty, rw, th)
+            self.screen.blit(self.fsmall.render(tname, True, C_WARN),
+                             (rx + 10, ty + 7))
+            for i, (a, b) in enumerate(trows):
+                self.screen.blit(self.fsmall.render(a, True, C_TEXT_DIM),
+                                 (rx + 10, ty + 26 + i * 15))
+                self.screen.blit(self.fsmall.render(b, True, C_TEXT),
+                                 (rx + 96, ty + 26 + i * 15))
+            ty += th + 8
+
+    def _model_cached(self, rend, rect, mode_id, **kw):
+        """Adaptive model buffer: below 30 fps the 3D renders at reduced
+        resolution (0.66x / 0.5x -- fill cost scales ~2-4x down and the
+        sub-pixel cull drops more faces), then smoothscales up. It still
+        re-renders EVERY frame so the animation stays fluid instead of
+        freezing between refreshes.  Anchors/mouse are remapped so
+        hover-picking and blueprint callouts stay in screen space."""
+        slow = self.fps < 30.0
+        sc = 1.0 if not slow else (0.66 if self.fps >= 18 else 0.5)
+        sw, sh = max(64, int(rect.w * sc)), max(64, int(rect.h * sc))
+        ck = self._mc.get(mode_id)
+        if ck is None or ck.get_size() != (sw, sh):
+            ck = pygame.Surface((sw, sh), pygame.SRCALPHA)
+            self._mc[mode_id] = ck
+        mp = kw.get("mouse_pos")
+        if mp is not None:                          # screen -> buffer coords
+            kw["mouse_pos"] = ((mp[0] - rect.x) * sc,
+                               (mp[1] - rect.y) * sc)
+        ck.fill((0, 0, 0, 0))
+        rend.render(ck, pygame.Rect(0, 0, sw, sh), **kw)
+        # part anchors back to screen space (buffer coords + rect offset)
+        rend._last_screeninfo = [
+            (pi, rect.x + x / sc, rect.y + y / sc, rad / sc, d, t)
+            for pi, x, y, rad, d, t in rend._last_screeninfo]
+        if sc == 1.0:
+            self.screen.blit(ck, rect.topleft)
+        else:
+            self.screen.blit(pygame.transform.smoothscale(
+                ck, (rect.w, rect.h)), rect.topleft)
+
     def draw_preview(self):
-        rect = pygame.Rect(0, 34, self.W, self.H - 34)
-        self.renderer.render(self.screen, rect, self.group_angle, self.pt.firing_glow,
-                             mouse_pos=pygame.mouse.get_pos(),
-                             show_labels=self.show_labels, label_font=self.fsmall,
-                             interactive=True, injection=self._injection,
-                             heat=self._heat_norm(),
-                             selector_radius=output_gear_mesh_radius(self.kin["gear"] - 1))
+        rect = pygame.Rect(0, TOP_BAR_H, self.W, self.H - TOP_BAR_H - BOTTOM_BAR_H)
+        self._model_cached(self.renderer, rect, 0,
+                           angles=self.group_angle,
+                           firing_glow=self.pt.firing_glow,
+                           mouse_pos=pygame.mouse.get_pos(),
+                           show_labels=self.show_labels, label_font=self.fsmall,
+                           interactive=True, injection=self._injection,
+                           heat=self._heat_norm(),
+                           selector_radius=self.sel_radius,
+                           fog_col=(52, 56, 64))
+        if self.blueprint:
+            self._draw_blueprint(rect)
         self.draw_view_tabs()
         self.draw_spec_card()
         self.draw_bench_panel()
         self.draw_config_panel()
         self.draw_power_path()
+        self.draw_ringclutch_panel()
 
     def draw_carview(self):
         """The separate WHOLE-CAR 3D view: the entire vehicle to scale with the same
         full / exploded / assembly + section-cut, hover-to-inspect and orbit controls
         as the engine preview, but rendered from the car renderer."""
-        rect = pygame.Rect(0, 34, self.W, self.H - 34)
-        self.car.render(self.screen, rect, self.group_angle, self.pt.firing_glow,
-                        mouse_pos=pygame.mouse.get_pos(),
-                        show_labels=self.show_labels, label_font=self.fsmall,
-                        interactive=True, heat=0.0)
+        rect = pygame.Rect(0, TOP_BAR_H, self.W, self.H - TOP_BAR_H - BOTTOM_BAR_H)
+        self._model_cached(self.car, rect, 2,
+                           angles=self.group_angle,
+                           firing_glow=self.pt.firing_glow,
+                           mouse_pos=pygame.mouse.get_pos(),
+                           show_labels=self.show_labels, label_font=self.fsmall,
+                           interactive=True, heat=0.0,
+                           fog_col=(52, 56, 64))
+        if self.blueprint:
+            self._draw_blueprint(rect)
         self.draw_view_tabs()
         self.draw_spec_card()
         # whole-car dimensional readout (real-life scale)
@@ -5106,10 +6707,6 @@ class App:
             self.screen.blit(self.fsmall.render(lab, True, C_TEXT_DIM), (px + 10, ry))
             vimg = self.fsmall.render(val, True, C_TEXT)
             self.screen.blit(vimg, (px + pw - 10 - vimg.get_width(), ry))
-        hint = ("1 FULL  2 EXPLODED  3 ASSEMBLY  4/X SECTION   drag orbit | wheel zoom | "
-                "right/middle pan | L (or LABELS chip) = names | [TAB] engine>car>drive")
-        self.screen.blit(self.fsmall.render(hint, True, C_TEXT_DIM),
-                         (14, self.H - 26))
 
     def _bench_specs(self):
         nrings = DIMS["trans_rings"]
@@ -5117,9 +6714,9 @@ class App:
             ("Engine Power", "engine_power", 0.0, 1.0, False),
             ("Hydraulic Pressure", "hyd_pressure", 0.0, 1.0, False),
             ("Main Wet Clutch (grip)", "clutch_main", 0.0, 1.0, False),
-            ("Trans Wet Clutch (bind)", "trans_bind_cmd", 0.0, 1.0, False),
+            ("Ring-Gap Pressure (fill)", "trans_bind_cmd", 0.0, 1.0, False),
             ("Coolant Flow", "coolant_flow", 0.0, 1.0, False),
-            ("Set Gear (ring shift)", "gear_sel", 0, nrings - 1, True),
+            ("Shifter Ring (slides UP)", "gear_sel", 0, nrings - 1, True),
         ]
 
     def _bench_layout(self):
@@ -5168,9 +6765,13 @@ class App:
         rows = [
             ("Piston", "%5.0f rpm" % k["piston"], C_RING_HOT),
             ("Core", "%5.0f  clutch slip %2.0f%%" % (k["core"], k["slip1"]), C_TEXT),
-            ("Ratio (bind)", "%.2f:1  slip %2.0f%%" % (k["ratio"], k["bind_slip"]), C_TEXT),
+            ("Ratio (lock)", "%.2f:1  lock %2.0f%%" % (k["ratio"], k["lock"] * 100), C_TEXT),
+            ("Ring / SlipLyr", "ring %d/%d  gap %s" % (
+                k["seated"] + 1, k["ngear"],
+                ("none" if k["slip_layer"] < 0 else str(k["slip_layer"] + 1))),
+             C_ACCENT if k["lock"] > 0.6 else C_WARN),
             ("TransOut / Gen", "%5.0f / %5.0f" % (k["trans_out"], abs(k["gen"])), C_GOOD),
-            ("Gear / Fly", "%d of %d  |  %4.0f" % (k["gear"], k["ngear"], k["fly"]), C_TEXT),
+            ("Shifter / Fly", "pos %4.1f | %4.0f" % (k["sel_pos"], k["fly"]), C_TEXT),
             ("Comb/min", "%7.0f  (%d/rev)" % (k["combust_min"], combustion_count(self.combustions)), C_RING_HOT),
             ("Press / PR", "%3.0f kPa  %.2fx" % (p["pressure_kpa"], p["pressure_ratio"]), C_ACCENT),
             ("Air / Fuel", "%4.1f / %4.2f g/s" % (p["air_g_s"], p["fuel_g_s"]), C_TEXT),
@@ -5202,6 +6803,52 @@ class App:
             self.screen.blit(v, (px + pw - 12 - v.get_width(), oy))
             oy += 15
 
+    def draw_ringclutch_panel(self):
+        """Standalone MULTILAYER RING-CLUTCH diagram (per image.png): concentric
+        ring layers, each annular gap glowing as its wet-clutch layer fills with
+        hydraulic pressure (engagement sweeps centre->outward), and the receival
+        pinion dot sliding UP the right-hand rail to the seated ring."""
+        x, y, w, h = self.W - 384, self.H - BOTTOM_BAR_H - 442, 372, 172
+        panel(self.screen, x, y, w, h)
+        self.screen.blit(self.fsmall.render(
+            "RING CLUTCH  --  annular hydraulic gaps", True, C_ACCENT), (x + 10, y + 8))
+        n = DIMS["trans_rings"]
+        dr, r0 = 9.2, 17.0
+        dcx, dcy = x + 82, y + h // 2 + 14
+        for k in range(n):
+            rr = r0 + k * dr
+            seated = (k == self.kin["seated"])
+            pygame.draw.circle(self.screen, C_ACCENT if seated else C_TRANS,
+                               (dcx, dcy), int(rr + 0.5), 2 if seated else 1)
+            f = self.gap_fill[k] if k < len(self.gap_fill) else 0.0
+            gcol = _mix((52, 64, 74), C_GAPFILL_HI, f)
+            pygame.draw.circle(self.screen, gcol, (dcx, dcy),
+                               max(2, int(rr - dr * 0.48)), max(1, int(1 + 4 * f)))
+        # core + receival pinion on the right rail (the image's side-view side)
+        pygame.draw.circle(self.screen, C_SHAFT, (dcx, dcy), 5)
+        sx = dcx + int(r0 + self.sel_pos * dr)
+        pygame.draw.circle(self.screen, C_OUTGEAR, (sx, dcy), 5)
+        pygame.draw.circle(self.screen, (185, 150, 55), (sx, dcy), 5, 1)
+        pygame.draw.line(self.screen, (120, 130, 145),
+                         (dcx + int(r0 - 9), dcy), (dcx + int(r0 + n * dr + 4), dcy), 1)
+        locked = sum(1 for f in self.gap_fill if f > 0.995)
+        tx = x + 190
+        dlines = [
+            ("pinion @ ring %d/%d" % (self.kin["seated"] + 1, n), C_OUTGEAR),
+            ("locked gaps %d  slip %s" % (
+                locked, "none" if self.kin["slip_layer"] < 0
+                        else "gap %d" % (self.kin["slip_layer"] + 1)),
+             C_GOOD if self.kin["slip_layer"] < 0 else C_WARN),
+            ("output lock %2.0f%%" % (self.kin["lock"] * 100), C_TEXT),
+            ("gap fill %3.0f%%  centre->out" % (self.kin["bind"] * 100), C_TEXT_DIM),
+            ("shifter pos %4.2f  mesh %2.0f%%" % (
+                self.sel_pos, self.kin["mesh"] * 100), C_TEXT_DIM),
+            ("slip while gear locked =", C_TEXT_DIM),
+            ("high-pressure disengage", C_TEXT_DIM),
+        ]
+        for i, (txt, col) in enumerate(dlines):
+            self.screen.blit(self.fm.render(txt, True, col), (tx, y + 30 + i * 19))
+
     def _bench_hit(self, pos):
         """If the mouse is on a bench slider, return its index, else None."""
         _, _, _, _, rects = self._bench_layout()
@@ -5219,7 +6866,7 @@ class App:
         setattr(self, attr, int(round(val)) if disc else val)
 
     def _config_geom(self):
-        return self.W - 332, self.H - 252, 320, 240
+        return self.W - 332, self.H - 252 - BOTTOM_BAR_H - 6, 320, 240
 
     def _combust_slider_rect(self):
         x, y, w, h = self._config_geom()
@@ -5275,15 +6922,20 @@ class App:
 
     def draw_view_tabs(self):
         r = self._rend()
-        x, y = 12, 42
+        x, y = 12, TOP_BAR_H + 8
         tabs = (("1", "FULL", "full"), ("2", "EXPLODED", "exploded"),
                 ("3", "ASSEMBLY", "assembly"), ("4", "SECTION-CUT", "section"))
+        self._view_tab_rects = []
+        mouse = pygame.mouse.get_pos()
         for key, name, mode in tabs:
             cur = r.section if mode == "section" else (r.view == mode)
             img = self.fsmall.render("%s %s" % (key, name), True,
                                      C_TEXT if cur else C_TEXT_DIM)
             w = img.get_width() + 18
-            panel(self.screen, x, y, w, 22, alpha=225 if cur else 150)
+            rr = pygame.Rect(x, y, w, 22)
+            self._view_tab_rects.append((rr, mode))
+            panel(self.screen, x, y, w, 22,
+                  alpha=225 if cur else (190 if rr.collidepoint(mouse) else 150))
             if cur:
                 pygame.draw.rect(self.screen, C_ACCENT, (x, y, w, 22), 1, border_radius=6)
             self.screen.blit(img, (x + 9, y + 4))
@@ -5341,21 +6993,22 @@ class App:
     def draw_power_path(self):
         firing_now = int((self.pt.firing_glow > 0.4).sum())
         ccol = C_RING_HOT if firing_now else C_TEXT_DIM
+        ytop = self.H - BOTTOM_BAR_H - 118          # power-path panel clears the bottom bar
         self.screen.blit(self.fsmall.render(
             "Combustion: %d chamber glow  mode %d/rev   %.0f combustions/min   Piston %.0f rpm   Generator %.0f rpm" % (
                 firing_now, combustion_count(self.combustions), self.kin["combust_min"],
-                self.kin["piston"], abs(self.kin["out"])), True, ccol), (14, self.H - 124))
+                self.kin["piston"], abs(self.kin["out"])), True, ccol), (14, ytop - 20))
         lines = [
             "POWER PATH  (fuel -> charge):",
             "turbo + auto supercharger -> sealed chamber -> 8-chamber ring -> multi-plate main clutch",
-            "-> gear wet-clutch rings -> receival gear -> MAIN generator -> supercaps/battery",
+            "-> ring-clutch layers (hyd gaps, centre->out) -> receival pinion -> MAIN generator -> caps/batt",
             "HEAT RECOVER: turbo -> 2nd turbine -> cooling ring -> heat shield -> boiler (low-boil fluid)",
             "-> dual-chamber compound expander (reuse PSI x3, cool by VENTING) || REGEN: wheel-gens",
         ]
-        panel(self.screen, 12, self.H - 108, 838, 96)
+        panel(self.screen, 12, ytop, 838, 96)
         for i, ln in enumerate(lines):
             self.screen.blit(self.fsmall.render(ln, True, C_ACCENT if i == 0 else C_TEXT),
-                             (22, self.H - 102 + i * 17))
+                             (22, ytop + 6 + i * 17))
 
     # ---- drive ----
     def draw_drive(self):
@@ -5379,20 +7032,91 @@ class App:
                                  self.group_angle, self.pt.firing_glow,
                                  show_labels=False, view_override="full",
                                  injection=self._injection, heat=self._heat_norm(),
-                                 selector_radius=output_gear_mesh_radius(self.kin["gear"] - 1))
+                                 selector_radius=self.sel_radius)
         self.screen.blit(self._inset_cache, (ir.x, ir.y + 16))
 
     def draw_road(self):
         horizon = int(self.H * 0.42) - int(self.cur_grade * 600)
         horizon = max(120, min(self.H - 200, horizon))
-        self.screen.blit(self._sky, (0, 34), area=pygame.Rect(0, 0, self.W, horizon - 34))
-        pygame.draw.rect(self.screen, C_GRASS, (0, horizon, self.W, self.H - horizon))
+        self.screen.blit(self._sky, (0, TOP_BAR_H),
+                         area=pygame.Rect(0, 0, self.W, horizon - TOP_BAR_H))
+        # distant ridge silhouettes sliding slowly past (parallax with travel)
+        for step, (depth, col) in enumerate(((0.045, (24, 38, 54)),
+                                             (0.085, (30, 50, 60)))):
+            ridge = []
+            for i in range(0, self.W + 60, 60):
+                t = (i + self.world.dist_m * depth * 60.0) / 300.0 + step * 7.0
+                ridge.append((i, horizon - 8 - (math.sin(t * 1.7) * 10
+                                              + math.sin(t * 0.53) * 18)))
+            pygame.draw.polygon(self.screen, col,
+                                ridge + [(self.W, horizon + 1), (0, horizon + 1)])
+        # two-band grass: darker strip at the horizon line, brighter foreground
+        pygame.draw.rect(self.screen, (24, 42, 28), (0, horizon, self.W, 26))
+        pygame.draw.rect(self.screen, C_GRASS,
+                         (0, horizon + 26, self.W, self.H - horizon - 26))
+        # drifting clouds (cached sprites, parallax with distance travelled)
+        if self._clouds is None:
+            self._clouds = []
+            for i in range(4):
+                cs = pygame.Surface((280, 80), pygame.SRCALPHA)
+                for j in range(5):
+                    cx0 = 60 + j * 38 + (i * 53 + j * 29) % 40
+                    cy0 = 40 + (i * 31 + j * 17) % 18
+                    rr = 30 + (i * 41 + j * 23) % 22
+                    pygame.draw.ellipse(cs, (232, 240, 250, 70),
+                                        (cx0 - rr, cy0 - rr * 0.45,
+                                         rr * 2, rr * 0.9))
+                self._clouds.append(cs)
+        for i, cs in enumerate(self._clouds):
+            cxx = (i * self.W * 0.27 - self.world.dist_m * (0.9 + i * 0.35)) \
+                % (self.W + 300) - 150
+            self.screen.blit(cs, (cxx, self.H * (0.05 + i * 0.075)))
+        # roadside trees sweep past with perspective scale -- sells the speed
         cxv = self.W // 2 + int(self.world.steer * 60)
         road_w_bot = self.W * 0.8
+        frac = (self.world.dist_m % 25.0) / 25.0
+        for k in range(16):
+            s = (k + frac) / 16.0          # nearness: grows as car advances
+            if s < 0.04 or s > 0.99:
+                continue
+            n = int(self.world.dist_m / 25.0) + 16 - k   # stable tree identity
+            hsh = (n * 2654435761 & 0xFFFF) / 65535.0
+            y = horizon + (self.H - horizon) * s * s
+            th = 10 + 150 * s * s * (0.7 + 0.6 * hsh)
+            side = 1.0 if (n & 1) else -1.0
+            halfw = 40 + s * s * (road_w_bot / 2 - 40)
+            x = cxv + (self.W / 2 - cxv) * s * s + side * (halfw * 1.12
+                                                         + 14 * s * s + hsh * 30)
+            gvar = int(hsh * 14)
+            trunk = (52, 38, 28)
+            leaf = (16 + gvar, 44 + gvar, 24 + gvar // 2)
+            twd = max(2, int(7 * s * s))
+            pygame.draw.rect(self.screen, trunk,
+                             (x - twd // 2, y - th * 0.35, twd, th * 0.35))
+            if n % 3:
+                pygame.draw.polygon(self.screen, leaf,
+                                    [(x, y - th), (x - th * 0.30, y - th * 0.30),
+                                     (x + th * 0.30, y - th * 0.30)])
+                pygame.draw.polygon(self.screen, leaf,
+                                    [(x, y - th * 0.78),
+                                     (x - th * 0.36, y - th * 0.22),
+                                     (x + th * 0.36, y - th * 0.22)])
+            else:
+                pygame.draw.ellipse(self.screen, leaf,
+                                    (x - th * 0.34, y - th, th * 0.68,
+                                     th * 0.72))
         pts = [(cxv - 40, horizon), (cxv + 40, horizon),
                (self.W / 2 + road_w_bot / 2, self.H),
                (self.W / 2 - road_w_bot / 2, self.H)]
         pygame.draw.polygon(self.screen, C_ROAD, pts)
+        # faintly lighter centre lane gives the tarmac some grade depth
+        pts2 = [(cxv - 26, horizon), (cxv + 26, horizon),
+                (self.W / 2 + road_w_bot * 0.27, self.H),
+                (self.W / 2 - road_w_bot * 0.27, self.H)]
+        pygame.draw.polygon(self.screen, (47, 51, 60), pts2)
+        # anti-aliased road edges for a crisp ribbon
+        pygame.draw.aalines(self.screen, (88, 94, 108), True,
+                            [pts[0], pts[3], pts[2], pts[1]])
         phase = (self.world.dist_m * 0.5) % 1.0
         for k in range(0, 24):
             t0 = (k + phase) / 24.0
@@ -5419,16 +7143,25 @@ class App:
         self.drivecar.dist = 5.0 + min(1.3, self.cur_mph / 90.0)
         cw, ch = 760, 470
         cxr = int(self.W / 2 - cw / 2 + steer * 48)
-        rect = pygame.Rect(cxr, self.H - ch - 4, cw, ch)
+        rect = pygame.Rect(cxr, self.H - ch - BOTTOM_BAR_H - 4, cw, ch)
         self.drivecar.pan = np.array([0.0, 40.0])         # seat the car low in the frame
         # the rear light bar + reverse lights are REAL meshes on the model; they
         # brighten via the render glow params (no 2D overlay -> they track the body).
         brake_glow = min(1.0, self.brake * 1.4) if self.brake > 0.05 else 0.0
         reverse_glow = 1.0 if (self.world.gear < 0 and abs(self.world.v) > 0.2) else 0.0
-        self.drivecar.render(self.screen, rect, self.group_angle, self.pt.firing_glow,
-                             show_labels=False, view_override="full",
-                             injection=None, heat=0.0,
-                             brake_glow=brake_glow, reverse_glow=reverse_glow)
+        # like the engine inset, the full-car render is expensive: refresh the
+        # cache every OTHER frame and blit between (imperceptible at speed)
+        if self._car_cache is None or self._car_cache.get_size() != (cw, ch):
+            self._car_cache = pygame.Surface((cw, ch), pygame.SRCALPHA)
+        if self._frame % 2 == 0:
+            self._car_cache.fill((0, 0, 0, 0))
+            self.drivecar.render(self._car_cache, pygame.Rect(0, 0, cw, ch),
+                                 self.group_angle, self.pt.firing_glow,
+                                 show_labels=False, view_override="full",
+                                 injection=None, heat=0.0,
+                                 brake_glow=brake_glow,
+                                 reverse_glow=reverse_glow)
+        self.screen.blit(self._car_cache, rect.topleft)
         ccx = rect.centerx
         # live aero badge (morphed + hydrophobic Cd) above the car
         badge = "AI-AERO  Cd %.3f  A %.2fm2  RH %2.0f%%" % (
@@ -5560,11 +7293,16 @@ class App:
         self.screen.blit(self.fsmall.render("REV (R)" if rev else "DRIVE (R)", True, C_TEXT_DIM),
                          (235, 92))
         mpg = pt.last_mpg
-        mpg_txt = "----" if mpg >= 9999 else "{:,.0f}".format(mpg)
+        # >=9999 = literally no fuel burned yet -> display INF (infinite) MPG
+        mpg_txt = "INF" if mpg >= 9999 else "{:,.0f}".format(mpg)
         col = C_GOOD if mpg >= 800 else (C_WARN if mpg >= 300 else C_BAD)
-        self.screen.blit(self.fbig.render("%s MPG" % mpg_txt, True, col), (20, 130))
+        self.screen.blit(self.fbig.render("%s MPG" % mpg_txt, True, col), (20, 128))
+        # the multi-functional operating mode (fuel-free harvest / fuel charge)
+        mtxt, mcol = self._power_mode()
+        chip_w = self._chip(20, 168, mtxt, mcol)
         if self.world.cruise:
-            self.screen.blit(self.font.render("CRUISE ON", True, C_GOOD), (160, 165))
+            self.screen.blit(self.font.render("CRUISE ON", True, C_GOOD),
+                             (20 + chip_w + 10, 168))
 
         x, y, w = 24, self.H - 150, 260
         bar(self.screen, self.font, x, y, w, 14, pt.soc, C_ACCENT,
@@ -5583,7 +7321,7 @@ class App:
 
         # --- EFFICIENCY STACK: the new fuel-free MPG systems, live ------------
         ex, ey, ew = 12, 210, 300
-        panel(self.screen, ex, ey, ew, 372, alpha=205)
+        panel(self.screen, ex, ey, ew, 428, alpha=205)
         self.screen.blit(self.fsmall.render("EFFICIENCY STACK  (fuel-free -> MPG)",
                          True, C_ACCENT), (ex + 8, ey + 6))
         fg_pct = math.tan(self.future_grade) * 100.0
@@ -5593,7 +7331,15 @@ class App:
         morphed = self.cd_eff < VEH["Cd"] - 1e-4
         hydro_pct = (1.0 - hydro_cd_factor()) * 100.0
         duct_pct = (1.0 - duct_cd_factor(self.cur_mph)) * 100.0
+        mtxt, mcol = self._power_mode()
         rows = [
+            ("POWER MODE", mtxt, mcol),
+            ("NET FLOW", "%+5.0f W %s" % (self._net_kw * 1000.0,
+             "charge" if self._net_kw >= 0 else "drain"),
+             C_GOOD if self._net_kw >= 0 else C_WARN),
+            ("RING CLUTCH", "ring %d/%d  lock %2.0f%%" % (
+                self.kin["gear"], self.kin["ngear"], self.kin["lock"] * 100),
+             C_ACCENT if self.kin["lock"] > 0.6 else C_WARN),
             ("ACTIVE AERO", "%.3f>%.3f%s" % (VEH["Cd"], self.cd_eff,
              " MORPH" if morphed else ""), C_GOOD if morphed else C_TEXT_DIM),
             ("FLOW DUCT", "-%.1f%% wake" % duct_pct, C_GOOD if duct_pct > 0.05 else C_TEXT_DIM),
@@ -5636,37 +7382,30 @@ class App:
             vimg = self.fsmall.render(val, True, vc)
             self.screen.blit(vimg, (ex + ew - 12 - vimg.get_width(), ry))
 
-        panel(self.screen, self.W // 2 - 410, self.H - 56, 820, 46, alpha=175)
+        # compact status strip centred just above the bottom bar
         eng = "ENGINE FIRING" if pt.engine_on else "ENGINE OFF (electric)"
         ecol = C_RING_HOT if pt.engine_on else C_GOOD
         grade_pct = math.tan(self.cur_grade) * 100
         regen = " REGEN>>" if pt.regen_active else ""
-        orc = self.therm["orc_kw"]
         tcol = C_BAD if self.phys.get("shutdown") else (
             C_WARN if self.phys.get("overheat") else C_TEXT)
-        base = "%s%s   grade %+4.1f%%   %6.2f mi   " % (eng, regen, grade_pct, pt.miles)
-        img = self.font.render(base, True, ecol)
-        self.screen.blit(img, (self.W // 2 - 400, self.H - 52))
-        self.screen.blit(self.font.render(
-            "%3.0fC(boil %3.0f/pcm %3.0f) %s  %s %.1fbar  RECOV %.0fkW" % (
-                self.temp_c, self.boiler_c, self.pcm_c, self.phys.get("status", "NORMAL"),
-                self.fluid, self.therm.get("steam_bar", 0.0), orc), True, tcol),
-            (self.W // 2 - 400 + img.get_width(), self.H - 52))
-        # second row: ambient harvest + pedal-assist + working-fluid life
-        aimg = self.font.render("HARVEST %3.0fW (%4.0f Wh)   " % (
-            self.ambient_kw * 1000.0, self.harvest_wh), True, C_ACCENT)
-        self.screen.blit(aimg, (self.W // 2 - 400, self.H - 32))
-        pw = DIMS["seats"] * PEDAL_WATTS_PER_SEAT * self.pedal_engage
-        pcol = C_GOOD if self.pedal_on else C_TEXT_DIM
-        pimg = self.font.render("PEDAL %s %3.0fW   " % (
-            "ON" if self.pedal_on else "off(K)", pw), True, pcol)
-        self.screen.blit(pimg, (self.W // 2 - 400 + aimg.get_width(), self.H - 32))
         svc_due = self.fluid_life <= 0.12
-        fcol = C_BAD if svc_due else C_GOOD
-        ftxt = "%s life %3.0f%%%s" % (
-            self.fluid, self.fluid_life * 100, " SERVICE(F)!" if svc_due else "")
-        self.screen.blit(self.font.render(ftxt, True, fcol),
-                         (self.W // 2 - 400 + aimg.get_width() + pimg.get_width(), self.H - 32))
+        s1 = self.fsmall.render("%s%s   grade %+4.1f%%" % (eng, regen, grade_pct),
+                                True, ecol)
+        s2 = self.fsmall.render(
+            "   %3.0fC boil %3.0f pcm %3.0f  %s  %s %.1fbar  RECOV %.1fkW  "
+            "HARVEST %3.0fW (%4.0f Wh)  %s life %3.0f%%%s" % (
+                self.temp_c, self.boiler_c, self.pcm_c,
+                self.phys.get("status", "NORMAL"), self.fluid,
+                self.therm.get("steam_bar", 0.0), self.therm.get("orc_kw", 0.0),
+                self.ambient_kw * 1000.0, self.harvest_wh,
+                self.fluid, self.fluid_life * 100,
+                " SERVICE(F)!" if svc_due else ""), True,
+            C_BAD if svc_due else tcol)
+        sy = self.H - BOTTOM_BAR_H - 24
+        self.screen.blit(s1, (self.W // 2 - (s1.get_width() + s2.get_width()) // 2, sy))
+        self.screen.blit(s2, (self.W // 2 - (s1.get_width() + s2.get_width()) // 2
+                              + s1.get_width(), sy))
 
         self.draw_pedal(self.W - 60, self.H - 150, "THR", self.throttle, C_GOOD)
         self.draw_pedal(self.W - 30, self.H - 150, "BRK", self.brake, C_BAD)
@@ -5684,19 +7423,17 @@ class App:
             lines = ["WHOLE-CAR VIEW  --  drag orbit | wheel zoom | right/middle pan | Shift fine",
                      "1 FULL  2 EXPLODED  3 ASSEMBLY  |  4/X SECTION-CUT | L (or LABELS chip) = names | R reset",
                      "hover any part = inspect its real spec | click = pin (or place next in assembly)",
-                     "[TAB] cycles ENGINE PREVIEW > CAR VIEW > DRIVE"]
-            y0, wide = 70, 830
+                     "click the view chips, or [TAB] / top tabs cycle ENGINE > CAR > DRIVE"]
+            y0, wide = TOP_BAR_H + 34, 830
         elif self.mode == self.MODE_PREVIEW:
             lines = ["ENGINE PREVIEW  --  drag orbit | wheel zoom-at-cursor | right/middle pan | Shift fine",
                      "1 FULL  2 EXPLODED  3 ASSEMBLY  |  4/X SECTION-CUT | L (or LABELS chip) = names | R reset",
                      "hover a part = inspect | click = pin (or place next in assembly)",
                      "P pause | -/= speed | [ ] pistons 1-10 | , . combustions 1-8 | F fluid | TAB car>drive"]
-            y0, wide = 70, 830
+            y0, wide = TOP_BAR_H + 34, 830
         else:
-            lines = ["DRIVE  --  W/Up: throttle  S/Down: brake  A/D: steer",
-                     "R: Drive<->Reverse (stopped) | C: cruise | E: engine burst | G: downhill",
-                     "K: passenger PEDAL-ASSIST | F: boiler fluid | SPACE: brake | TAB: preview | I: spec"]
-            y0, wide = 204, 620   # under the speedo, clear of the bottom energy bars
+            # DRIVE: its controls + multi-function blurb live in the bottom bar
+            return
         panel(self.screen, 12, y0 - 6, wide, len(lines) * 18 + 12)
         for i, ln in enumerate(lines):
             self.screen.blit(self.fsmall.render(ln, True, C_TEXT_DIM), (22, y0 + i * 18))
@@ -5855,7 +7592,7 @@ class App:
             "",
             "SOLAR (~%.0f W in sun): PV roof + film -- EXTERNAL energy, so below" % (
                 (AMBIENT_HARVEST_W["solar"] + AMBIENT_HARVEST_W["solar_roof"]) * SUN),
-            " ~50 mph it alone can cover the road load -> SOLAR-SUSTAINED, no",
+            " ~10-25 mph it alone can cover the road load -> SOLAR-SUSTAINED, no",
             " fuel (the tyre/tribo harvest only RECLAIMS rolling loss, never free).",
             "",
             "PEDALS (%.0f W/seat) stack on top of that:" % PEDAL_WATTS_PER_SEAT,
@@ -5887,11 +7624,22 @@ class App:
 def print_startup_banner():
     print("=" * 70)
     print(" GmansRun V1.17 -- HOHEV-Rotary Gen 4 Standalone Digital Twin")
-    print(" FINAL prototype -- to-scale, drivable, energy-honest (no free energy)")
     print("=" * 70)
     print(" PREVIEW mode loads first: orbit the full 3D engine and watch every")
     print(" part work. TAB cycles ENGINE PREVIEW > CAR VIEW (the whole vehicle to")
     print(" real-life scale, its own full/exploded/assembly) > DRIVE. I = full spec.")
+    print("-" * 70)
+    print(" NEW UI (reference-twin style): solid top bar with clickable")
+    print("   ENGINE / CAR / DRIVE tabs + toggle chips + fps, and a bottom")
+    print("   status bar. Model tabs use a GREY viewport for better contrast.")
+    print(" MULTILAYER RING-CLUTCH transmission (image.png): each annular gap")
+    print("   between concentric rings is a wet-clutch layer fed by high-pressure")
+    print("   fluid; engagement sweeps centre->out, the outermost gap SLIPS while")
+    print("   the gear stays locked in place = high-pressure-coupling disengage.")
+    print("   The ratchet shifter slides UP only and seats the receival pinion.")
+    print(" MULTI-FUNCTIONAL CAR: the whole efficiency stack combines so that at")
+    print("   low speed / light load the vehicle runs fuel-free (INF MPG); faster")
+    print("   or unused, the rotary burns fuel to CHARGE the battery instead.")
     print("-" * 70)
     print(" NEW EFFICIENCY STACK (all fuel-free, all automatic, all raise MPG):")
     print("   active morphing aero  |  dynamic regen suspension  |  thermoelectric TEG")
@@ -5908,18 +7656,18 @@ def print_startup_banner():
     print("   INERTIAL PENDULUM RIM: hanging bumper-skirt weights swing on accel/turn/incline")
     print("   changes and drive tiny generators; deploys at low speed, RETRACTS at high (6i)")
     print("   EM RAIL-RING DIRECT DRIVE: the wheel RIM is the rotor, a stator rail ring turns")
-    print("   it gearlessly (no drive clutch) at ~97%% -> less energy/mile, more MPG (11)")
+    print("   it gearlessly (no drive clutch) at ~99.3%% -> less energy/mile, more MPG (11)")
     print("   CAR VIEW shows all 4 rail-ring wheels with in-rim disc, rail, poles and labels")
     print("   SIZE-OPTIMIZED: optimize_harvest.py ran 300k+ tests to scale every harvester to")
     print("   its net-best size (benefit vs mass/drag) for max synergy -- +155.4%% cycle MPG (12)")
     print("   KINETIC->ELECTRICAL CHAIN re-optimized: generator/mechanical/gear to their")
-    print("   ceilings -> ~46.5%% fuel->wheel, more charge per gallon (see info 13, 0-loss gap)")
+    print("   ceilings -> ~58%% fuel->wheel, more charge per gallon (see info 13, 0-loss gap)")
     print("   STORAGE round-trips now modelled (correctness): fast->supercap, bulk->battery,")
-    print("   overflow->flywheel -- optimal routing keeps effective round-trip ~96%% (14)")
+    print("   overflow->flywheel -- optimal routing keeps effective round-trip ~99%% (14)")
     print("   ONE-PASS NETTING: harvest used the same instant for traction bypasses storage")
     print("   entirely; operating-point + control confirmed at optimum -- see info 14, 15")
-    print("   THROUGH-BODY FLOW DUCT: RAISED exit fills the base-wake centre (mid-height)")
-    print("   to kill pressure drag -> effective highway Cd ~0.039, +~10-26%% MPG (8d)")
+    print("   THROUGH-BODY FLOW DUCT: straight front-grill->rear-diffuser pipe fills the rear")
+    print("   wake to kill pressure drag (dominant at speed) -> big highway MPG gain (8d)")
     print("-" * 70)
     print(" Controls:")
     print("   TAB  cycle ENGINE PREVIEW > CAR VIEW > DRIVE   M  MPG chart   I  info   H  help")
