@@ -293,6 +293,15 @@ pinion → generator:
 **Optimized burst point (verified): 400 rpm × 8 combustions/rev** → 8.81 kW gen
 + 2.71 kW bounded same-second heat, 52.9% net fuel→electricity at the point.
 
+**Speed ceiling**: `MAX_PISTON_RPM = 1200` — a 760 mm combustion ring tops out
+at ~48 m/s rim speed (already aggressive vs. Wankel apex-seal speeds), so the
+displayed kinematics stay mechanically plausible: the ring runs at hundreds of
+rpm, not thousands, while the 34 mm receival pinion steps up ~3× (≈3,600 rpm at
+the generator at full power). Other firing constants: `FIRING_IDLE_RPM = 320`,
+`FIRING_GEN_RPM = 400`, `DRIVE_COMBUSTIONS = 8`, `FLYWHEEL_MAX_RPM = 20000`,
+`MAX_PISTON_RPM = 1200` (was 4500 — corrected; the earlier ceiling implied a
+~180 m/s rim speed).
+
 ## Thermal And Fluid Model
 
 Closed-loop steam/ORC heat recovery — keep heat, milk pressure:

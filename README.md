@@ -54,6 +54,7 @@ harvesters only reclaim what's already being dissipated.
 | Metric | Value |
 |---|---|
 | Engine burst point | **400 rpm × 8 combustions/rev** (swept optimum, +0.0% headroom) |
+| Ring speed ceiling | `MAX_PISTON_RPM` **1200** — ~48 m/s rim speed on the 760 mm ring; pinion ×3 → ~3,600 rpm gen |
 | Point efficiency | 8.81 kW gen + 2.71 kW bounded heat, **52.9%** fuel→electricity |
 | Integrated fuel→wheel | `FUEL_TO_WHEEL_EFF` **0.60** (indicated 0.44 × mech 0.955 × gen 0.975 × coupling 0.988 × rail 0.994 + ~13 pts heat bottoming) |
 | Vehicle | 765 kg, Cd 0.08 → **~0.041–0.061 effective**, Crr 0.0028 → **~0.00154**, frontal 1.58 m² |

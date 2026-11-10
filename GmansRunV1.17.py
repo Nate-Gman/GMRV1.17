@@ -168,7 +168,10 @@ DRIVE_COMBUSTIONS = 8         # corrected optimizer sweet spot for range-extende
 FLYWHEEL_MAX_RPM  = 20000.0   # magnetic-bearing safe ceiling
 OMEGA_VIEW        = 2.513     # preview rotation rate at 1.0x (~2.5 s / rev, viewable)
 INJECTOR_ANGLE    = math.pi / 2.0   # injector fixed at the top of the rim
-MAX_PISTON_RPM    = 4500.0    # piston RPM at full power / 8 combustions per rev
+MAX_PISTON_RPM    = 1200.0    # piston RPM at full power / 8 combustions per rev:
+#                               a 760 mm combustion ring tops out ~48 m/s rim speed
+#                               (already aggressive vs. Wankel apex seals); the
+#                               optimized generator burst point is only 400 rpm.
 VIEW_ROT_SCALE    = 0.03      # slows real RPMs to a viewable on-screen spin rate
 VISUAL_DETAIL     = 1.0       # mesh resolution for preview inspection
 SUPERCHARGER_BOOST_GAIN = 0.22
